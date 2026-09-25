@@ -29,7 +29,7 @@ for browser in ("chromium", "firefox"):
                 archive.write(path, relative)
     with ZipFile(target) as archive:
         names = set(archive.namelist())
-        required = {"manifest.json", "inference_worker.js", "vendor/wllama/index.js", "vendor/wllama/wasm/wllama.wasm"}
+        required = {"manifest.json", "popup.js", "runner.html", "runner.js", "inference_worker.js", "vendor/wllama/index.js", "vendor/wllama/wasm/wllama.wasm"}
         if required - names:
             raise RuntimeError(f"missing packaged files: {sorted(required - names)}")
     print(target)

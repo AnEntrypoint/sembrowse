@@ -26,6 +26,12 @@ if (!globalThis.__sembrowseLocalAttached) {
       onclick: String(element.onclick),
       disabled: element.disabled,
       readOnly: element.readOnly,
+      role: element.getAttribute("role"),
+      ariaLabel: element.getAttribute("aria-label"),
+      ariaExpanded: element.getAttribute("aria-expanded"),
+      ariaSelected: element.getAttribute("aria-selected"),
+      ariaControls: element.getAttribute("aria-controls"),
+      options: element.matches("select") ? Array.from(element.options).map((option) => [option.text, option.value, option.selected, option.disabled]) : undefined,
       form: form && { action: form.action, method: form.method, target: form.target, enctype: form.enctype, noValidate: form.noValidate }
     })
   }
@@ -61,6 +67,10 @@ if (!globalThis.__sembrowseLocalAttached) {
       return
     }
     if (message.type === "sembrowse-execute") {
+      if (snapshot?.fingerprint !== message.fingerprint) {
+        sendResponse({ error: "The page changed before the local decision could run" })
+        return
+      }
       if (message.operation === "SCROLL_UP" || message.operation === "SCROLL_DOWN") {
         scrollBy({ top: message.operation === "SCROLL_UP" ? -innerHeight * 0.8 : innerHeight * 0.8, behavior: "instant" })
         sendResponse({ description: message.operation, changed: true })
@@ -70,7 +80,7 @@ if (!globalThis.__sembrowseLocalAttached) {
         sendResponse({ description: "waiting", changed: true })
         return
       }
-      const selected = snapshot?.fingerprint === message.fingerprint && snapshot.candidates.find(({ id }) => id === message.id)
+      const selected = snapshot.candidates.find(({ id }) => id === message.id)
       if (!selected || !selected.element.isConnected || !visible(selected.element)) {
         sendResponse({ error: "The page changed before the local decision could run" })
         return
@@ -78,6 +88,10 @@ if (!globalThis.__sembrowseLocalAttached) {
       const current = choices().find(({ element }) => element === selected.element)
       if (!current || current.description !== selected.description || current.fingerprint !== selected.fingerprint) {
         sendResponse({ error: "The selected action changed before execution" })
+        return
+      }
+      if (selected.mode !== message.operation) {
+        sendResponse({ error: "The selected operation is incompatible with the observed target" })
         return
       }
       if (message.operation === "TYPE_TEXT") {
@@ -95,6 +109,10 @@ if (!globalThis.__sembrowseLocalAttached) {
         else selected.element.value = value
         selected.element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }))
         selected.element.dispatchEvent(new Event("change", { bubbles: true }))
+        if ((selected.element.isContentEditable ? selected.element.textContent : selected.element.value) !== value) {
+          sendResponse({ error: "The selected field did not retain the generated text" })
+          return
+        }
         sendResponse({ description: selected.description, changed: true })
         return
       }
@@ -107,11 +125,15 @@ if (!globalThis.__sembrowseLocalAttached) {
         selected.element.selectedIndex = message.optionIndex
         selected.element.dispatchEvent(new Event("input", { bubbles: true }))
         selected.element.dispatchEvent(new Event("change", { bubbles: true }))
+        if (selected.element.selectedIndex !== message.optionIndex) {
+          sendResponse({ error: "The selected option did not remain selected" })
+          return
+        }
         sendResponse({ description: `${selected.description}: ${option.text}`, changed: true })
         return
       }
-      sendResponse({ description: selected.description, changed: true })
       selected.element.click()
+      sendResponse({ description: selected.description, changed: true })
     }
   })
 }

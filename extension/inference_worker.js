@@ -33,9 +33,11 @@ async function load(id, modelId) {
   send(id, { type: "ready" })
 }
 
-async function chooseOne(goal, state, candidates, instruction) {
+async function chooseOne(goal, state, candidates, instruction, budget) {
   if (!engine || !selected) return { error: "Load a browser model first" }
   if (!Array.isArray(candidates) || candidates.length < 2 || candidates.length > 16) return { error: "The browser decision needs 2 to 16 compatible choices" }
+  if (budget.calls >= budget.limit) return { error: "The local model-call budget is exhausted" }
+  budget.calls += 1
   const labels = labelsFor(candidates.length)
   const options = candidates.map(({ description }, index) => `${labels[index]}. ${description}`).join("\n")
   const response = await engine.createChatCompletion({
@@ -59,9 +61,11 @@ async function chooseOne(goal, state, candidates, instruction) {
   return { candidate: candidates[index], probability: probabilities[index], probabilities: Object.fromEntries(candidates.map((candidate, position) => [candidate.id, probabilities[position]])) }
 }
 
-const chooseCompatible = (goal, state, candidates, instruction) => candidates.length === 1 ? Promise.resolve({ candidate: candidates[0], probability: 1 }) : chooseOne(goal, state, candidates, instruction)
+const chooseCompatible = (goal, state, candidates, instruction, budget) => candidates.length === 1 ? Promise.resolve({ candidate: candidates[0], probability: 1 }) : chooseOne(goal, state, candidates, instruction, budget)
 
-async function typeText(goal, state, target) {
+async function typeText(goal, state, target, budget) {
+  if (budget.calls >= budget.limit) return { error: "The local model-call budget is exhausted" }
+  budget.calls += 1
   const response = await engine.createChatCompletion({
     messages: [{ role: "system", content: "Return only the short text that belongs in the selected browser field. Do not add quotes, labels, or explanation." }, { role: "user", content: `Goal:\n${goal}\n\nPage:\n${state.text}\n\nField:\n${target.description}` }],
     max_tokens: 64,
@@ -73,7 +77,8 @@ async function typeText(goal, state, target) {
   return text || { error: "The local model did not generate field text" }
 }
 
-async function decide(id, state, goal, candidates) {
+async function decide(id, state, goal, candidates, remainingCalls) {
+  const budget = { calls: 0, limit: Math.min(Math.max(Number(remainingCalls) || 0, 0), 4) }
   const available = Array.isArray(candidates) ? candidates : []
   const operations = [
     available.some((candidate) => candidate.mode === "CLICK") && { id: "CLICK", description: "CLICK a visible button, link, checkbox, or control" },
@@ -85,30 +90,30 @@ async function decide(id, state, goal, candidates) {
     { id: "DONE", description: "DONE because the goal is visibly complete" },
     { id: "BLOCKED", description: "BLOCKED because no safe visible action can advance the goal" }
   ].filter(Boolean)
-  const operation = await chooseOne(goal, state, operations, "Allowed operations:")
-  if (operation.error) return send(id, operation)
+  const operation = await chooseOne(goal, state, operations, "Allowed operations:", budget)
+  if (operation.error) return send(id, { ...operation, calls: budget.calls })
   if (operation.candidate.id === "DONE" || operation.candidate.id === "BLOCKED" || operation.candidate.id === "WAIT" || operation.candidate.id.startsWith("SCROLL")) {
-    send(id, { type: "decision", operation: operation.candidate.id, probability: operation.probability })
+    send(id, { type: "decision", operation: operation.candidate.id, probability: operation.probability, calls: budget.calls })
     return
   }
   const targets = available.filter((candidate) => candidate.mode === operation.candidate.id)
-  const target = await chooseCompatible(goal, state, targets, `Choose the compatible target for ${operation.candidate.id}:`)
-  if (target.error) return send(id, target)
+  const target = await chooseCompatible(goal, state, targets, `Choose the compatible target for ${operation.candidate.id}:`, budget)
+  if (target.error) return send(id, { ...target, calls: budget.calls })
   if (operation.candidate.id === "SELECT") {
-    const option = await chooseCompatible(goal, state, target.candidate.options.map((choice) => ({ id: String(choice.index), description: choice.description })), "Choose the observed native dropdown option:")
-    if (option.error) return send(id, option)
-    send(id, { type: "decision", operation: "SELECT", id: target.candidate.id, optionIndex: Number(option.candidate.id), probability: target.probability })
+    const option = await chooseCompatible(goal, state, target.candidate.options.map((choice) => ({ id: String(choice.index), description: choice.description })), "Choose the observed native dropdown option:", budget)
+    if (option.error) return send(id, { ...option, calls: budget.calls })
+    send(id, { type: "decision", operation: "SELECT", id: target.candidate.id, optionIndex: Number(option.candidate.id), probability: target.probability, calls: budget.calls })
     return
   }
-  const text = operation.candidate.id === "TYPE_TEXT" ? await typeText(goal, state, target.candidate) : undefined
-  if (text?.error) return send(id, text)
-  send(id, { type: "decision", operation: operation.candidate.id, id: target.candidate.id, text, probability: target.probability })
+  const text = operation.candidate.id === "TYPE_TEXT" ? await typeText(goal, state, target.candidate, budget) : undefined
+  if (text?.error) return send(id, { ...text, calls: budget.calls })
+  send(id, { type: "decision", operation: operation.candidate.id, id: target.candidate.id, text, probability: target.probability, calls: budget.calls })
 }
 
 self.addEventListener("message", async ({ data }) => {
   try {
     if (data.type === "load") await load(data.id, data.modelId)
-    if (data.type === "decide") await decide(data.id, data.state, data.goal, data.candidates)
+    if (data.type === "decide") await decide(data.id, data.state, data.goal, data.candidates, data.remainingCalls)
   } catch (error) {
     send(data.id, { error: error?.message ?? String(error) })
   }

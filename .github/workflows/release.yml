@@ -16,6 +16,7 @@ jobs:
           python-version: "3.12"
       - run: node --check extension/content.js
       - run: node --check extension/popup.js
+      - run: node --check extension/runner.js
       - run: node --check extension/inference_worker.js
       - run: python scripts/build_extensions.py "0.1.0"
       - run: sha256sum dist/* > dist/SHA256SUMS
