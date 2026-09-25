@@ -15,7 +15,7 @@ decide.addEventListener("click", async () => {
     return
   }
   decide.disabled = true
-  status.textContent = "Opening the local task runner…"
+  status.textContent = "Starting the continuous local task…"
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
     const origins = ["<all_urls>"]
@@ -28,7 +28,7 @@ decide.addEventListener("click", async () => {
     const task = { id: crypto.randomUUID(), goal: taskGoal, modelId: model.value, tabId: tab.id }
     await chrome.storage.local.set({ goal: taskGoal, model: model.value, task })
     await chrome.windows.create({ url: chrome.runtime.getURL("runner.html"), type: "popup", width: 380, height: 620, focused: true })
-    status.textContent = "Local task runner opened"
+    status.textContent = "Continuous local task started"
   } catch (error) {
     status.textContent = error.message
     decide.disabled = false
