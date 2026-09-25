@@ -25,36 +25,51 @@ if (!globalThis.__sembrowseLocalAttached) {
       value: element.getAttribute("value"),
       onclick: String(element.onclick),
       disabled: element.disabled,
+      readOnly: element.readOnly,
       form: form && { action: form.action, method: form.method, target: form.target, enctype: form.enctype, noValidate: form.noValidate }
     })
   }
 
-  const choices = () => Array.from(document.querySelectorAll("button, a[href], input[type=button], input[type=submit]"))
+  const modeFor = (element) => {
+    if (element.matches("select")) return "SELECT"
+    if (element.matches("textarea, [contenteditable=true], input:not([type]), input[type=text], input[type=search], input[type=email], input[type=tel], input[type=url], input[type=number]")) return "TYPE_TEXT"
+    return "CLICK"
+  }
+
+  const choices = () => Array.from(document.querySelectorAll("button, a[href], input, textarea, select, [role=button], [role=combobox], [contenteditable=true]"))
+    .filter((element) => !element.matches("input[type=hidden], input[type=file], input[type=password]"))
     .filter(visible)
     .slice(0, 16)
     .map((element, index) => ({
       id: String(index + 1),
+      mode: modeFor(element),
       description: `${element.tagName.toLowerCase()}: ${(element.innerText || element.value || element.getAttribute("aria-label") || "unnamed").trim().slice(0, 48)}`,
+      options: element.matches("select") ? Array.from(element.options).slice(0, 16).map((option, optionIndex) => ({ index: optionIndex, description: option.text.trim().slice(0, 48) })) : [],
       fingerprint: actionFingerprint(element),
       element
     }))
 
   chrome.runtime.onMessage.addListener((message, _, sendResponse) => {
     const candidates = choices()
-    if (message.type === "sembrowse-candidates" && candidates.length < 2) {
-      sendResponse({ error: "This page has fewer than two visible clickable actions" })
-      return
-    }
     if (message.type === "sembrowse-candidates") {
       snapshot = { candidates, fingerprint: crypto.randomUUID() }
       sendResponse({
-        candidates: candidates.map(({ id, description }) => ({ id, description })),
-        state: { url: location.href, title: document.title, text: document.body.innerText.slice(0, 512) },
+        candidates: candidates.map(({ id, mode, description, options }) => ({ id, mode, description, options })),
+        state: { url: location.href, title: document.title, text: document.body.innerText.slice(0, 512), scroll: { top: scrollY, height: document.documentElement.scrollHeight, viewport: innerHeight } },
         fingerprint: snapshot.fingerprint
       })
       return
     }
     if (message.type === "sembrowse-execute") {
+      if (message.operation === "SCROLL_UP" || message.operation === "SCROLL_DOWN") {
+        scrollBy({ top: message.operation === "SCROLL_UP" ? -innerHeight * 0.8 : innerHeight * 0.8, behavior: "instant" })
+        sendResponse({ description: message.operation, changed: true })
+        return
+      }
+      if (message.operation === "WAIT") {
+        sendResponse({ description: "waiting", changed: true })
+        return
+      }
       const selected = snapshot?.fingerprint === message.fingerprint && snapshot.candidates.find(({ id }) => id === message.id)
       if (!selected || !selected.element.isConnected || !visible(selected.element)) {
         sendResponse({ error: "The page changed before the local decision could run" })
@@ -65,7 +80,37 @@ if (!globalThis.__sembrowseLocalAttached) {
         sendResponse({ error: "The selected action changed before execution" })
         return
       }
-      sendResponse({ description: selected.description })
+      if (message.operation === "TYPE_TEXT") {
+        const value = String(message.text || "")
+        if (selected.element.readOnly) {
+          sendResponse({ error: "The selected field became read-only" })
+          return
+        }
+        if (!value) {
+          sendResponse({ error: "The local model did not produce text" })
+          return
+        }
+        selected.element.focus()
+        if (selected.element.isContentEditable) selected.element.textContent = value
+        else selected.element.value = value
+        selected.element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }))
+        selected.element.dispatchEvent(new Event("change", { bubbles: true }))
+        sendResponse({ description: selected.description, changed: true })
+        return
+      }
+      if (message.operation === "SELECT") {
+        const option = selected.element.options?.[message.optionIndex]
+        if (!option || option.disabled) {
+          sendResponse({ error: "The local model selected an unavailable option" })
+          return
+        }
+        selected.element.selectedIndex = message.optionIndex
+        selected.element.dispatchEvent(new Event("input", { bubbles: true }))
+        selected.element.dispatchEvent(new Event("change", { bubbles: true }))
+        sendResponse({ description: `${selected.description}: ${option.text}`, changed: true })
+        return
+      }
+      sendResponse({ description: selected.description, changed: true })
       selected.element.click()
     }
   })

@@ -12,8 +12,10 @@
       <button id="load">Load model in this browser</button>
       <label for="goal">Goal for this page</label>
       <textarea id="goal" rows="4" maxlength="256" placeholder="Describe the next visible action"></textarea>
-      <button id="decide">Run one local decision</button>
+      <button id="decide">Run task locally</button>
+      <button id="stop" disabled>Stop task</button>
       <output id="status" aria-live="polite">Choose a model, then load it locally through WebGPU.</output>
+      <ol id="trace" aria-live="polite"></ol>
     </main>
     <script src="popup.js"></script>
   </body>

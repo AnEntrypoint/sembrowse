@@ -19,7 +19,7 @@ const softmax = (values) => {
 async function load(id, modelId) {
   if (engine) return send(id, { type: "ready" })
   selected = models[modelId]
-  if (!selected) throw new Error("Choose a supported browser model")
+  if (!selected) return send(id, { error: "Choose a supported browser model" })
   engine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
   self.postMessage({ type: "progress", message: "Downloading or opening the browser-cached model…" })
   await engine.loadModelFromUrl(selected.url, {
@@ -33,13 +33,13 @@ async function load(id, modelId) {
   send(id, { type: "ready" })
 }
 
-async function choose(id, state, goal, candidates) {
-  if (!engine || !selected) throw new Error("Load a browser model first")
-  if (!Array.isArray(candidates) || candidates.length < 2 || candidates.length > 16) throw new Error("The browser decision needs 2 to 16 visible actions")
+async function chooseOne(goal, state, candidates, instruction) {
+  if (!engine || !selected) return { error: "Load a browser model first" }
+  if (!Array.isArray(candidates) || candidates.length < 2 || candidates.length > 16) return { error: "The browser decision needs 2 to 16 compatible choices" }
   const labels = labelsFor(candidates.length)
   const options = candidates.map(({ description }, index) => `${labels[index]}. ${description}`).join("\n")
   const response = await engine.createChatCompletion({
-    messages: [{ role: "system", content: "Choose one visible browser action that advances the user goal. Reply with exactly one allowed letter." }, { role: "user", content: `Goal:\n${goal}\n\nPage:\n${state.text}\n\nAllowed actions:\n${options}` }],
+    messages: [{ role: "system", content: "Choose exactly one allowed letter for the next browser step." }, { role: "user", content: `Goal:\n${goal}\n\nRecent actions:\n${state.history?.join("\n") || "none"}\n\nPage:\n${state.text}\n\n${instruction}\n${options}` }],
     max_tokens: 1,
     temperature: 1,
     top_k: 0,
@@ -53,16 +53,62 @@ async function choose(id, state, goal, candidates) {
   })
   const top = response.choices?.[0]?.logprobs?.content?.[0]?.top_logprobs ?? []
   const logits = labels.map((label) => Number(top.find((item) => item.token === label || item.bytes?.[0] === label.charCodeAt(0))?.logprob))
-  if (logits.some((value) => !Number.isFinite(value))) throw new Error("The browser model did not provide all action logits")
+  if (logits.some((value) => !Number.isFinite(value))) return { error: "The browser model did not provide all action logits" }
   const probabilities = softmax(logits)
   const index = probabilities.indexOf(Math.max(...probabilities))
-  send(id, { type: "decision", choice: candidates[index].id, probabilities: Object.fromEntries(candidates.map((candidate, position) => [candidate.id, probabilities[position]])) })
+  return { candidate: candidates[index], probability: probabilities[index], probabilities: Object.fromEntries(candidates.map((candidate, position) => [candidate.id, probabilities[position]])) }
+}
+
+const chooseCompatible = (goal, state, candidates, instruction) => candidates.length === 1 ? Promise.resolve({ candidate: candidates[0], probability: 1 }) : chooseOne(goal, state, candidates, instruction)
+
+async function typeText(goal, state, target) {
+  const response = await engine.createChatCompletion({
+    messages: [{ role: "system", content: "Return only the short text that belongs in the selected browser field. Do not add quotes, labels, or explanation." }, { role: "user", content: `Goal:\n${goal}\n\nPage:\n${state.text}\n\nField:\n${target.description}` }],
+    max_tokens: 64,
+    temperature: 0,
+    cache_prompt: false,
+    chat_template_kwargs: { enable_thinking: false }
+  })
+  const text = response.choices?.[0]?.message?.content?.trim().replace(/^['"]|['"]$/g, "").slice(0, 256)
+  return text || { error: "The local model did not generate field text" }
+}
+
+async function decide(id, state, goal, candidates) {
+  const available = Array.isArray(candidates) ? candidates : []
+  const operations = [
+    available.some((candidate) => candidate.mode === "CLICK") && { id: "CLICK", description: "CLICK a visible button, link, checkbox, or control" },
+    available.some((candidate) => candidate.mode === "TYPE_TEXT") && { id: "TYPE_TEXT", description: "TYPE_TEXT into a visible editable field" },
+    available.some((candidate) => candidate.mode === "SELECT" && candidate.options.length) && { id: "SELECT", description: "SELECT an observed native dropdown option" },
+    state.scroll?.top > 0 && { id: "SCROLL_UP", description: "SCROLL_UP to reveal earlier page content" },
+    state.scroll?.top + state.scroll?.viewport < state.scroll?.height && { id: "SCROLL_DOWN", description: "SCROLL_DOWN to reveal later page content" },
+    { id: "WAIT", description: "WAIT for the current page to settle" },
+    { id: "DONE", description: "DONE because the goal is visibly complete" },
+    { id: "BLOCKED", description: "BLOCKED because no safe visible action can advance the goal" }
+  ].filter(Boolean)
+  const operation = await chooseOne(goal, state, operations, "Allowed operations:")
+  if (operation.error) return send(id, operation)
+  if (operation.candidate.id === "DONE" || operation.candidate.id === "BLOCKED" || operation.candidate.id === "WAIT" || operation.candidate.id.startsWith("SCROLL")) {
+    send(id, { type: "decision", operation: operation.candidate.id, probability: operation.probability })
+    return
+  }
+  const targets = available.filter((candidate) => candidate.mode === operation.candidate.id)
+  const target = await chooseCompatible(goal, state, targets, `Choose the compatible target for ${operation.candidate.id}:`)
+  if (target.error) return send(id, target)
+  if (operation.candidate.id === "SELECT") {
+    const option = await chooseCompatible(goal, state, target.candidate.options.map((choice) => ({ id: String(choice.index), description: choice.description })), "Choose the observed native dropdown option:")
+    if (option.error) return send(id, option)
+    send(id, { type: "decision", operation: "SELECT", id: target.candidate.id, optionIndex: Number(option.candidate.id), probability: target.probability })
+    return
+  }
+  const text = operation.candidate.id === "TYPE_TEXT" ? await typeText(goal, state, target.candidate) : undefined
+  if (text?.error) return send(id, text)
+  send(id, { type: "decision", operation: operation.candidate.id, id: target.candidate.id, text, probability: target.probability })
 }
 
 self.addEventListener("message", async ({ data }) => {
   try {
     if (data.type === "load") await load(data.id, data.modelId)
-    if (data.type === "choose") await choose(data.id, data.state, data.goal, data.candidates)
+    if (data.type === "decide") await decide(data.id, data.state, data.goal, data.candidates)
   } catch (error) {
     send(data.id, { error: error?.message ?? String(error) })
   }
