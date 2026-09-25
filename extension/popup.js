@@ -1,57 +1,75 @@
-const endpoint = document.querySelector("#endpoint")
 const goal = document.querySelector("#goal")
+const model = document.querySelector("#model")
+const load = document.querySelector("#load")
+const decide = document.querySelector("#decide")
 const status = document.querySelector("#status")
+const worker = new Worker("inference_worker.js", { type: "module" })
+const pending = new Map()
+let sequence = 0
+let ready = false
 
-chrome.storage.local.get({ endpoint: endpoint.value, goal: "" }, ({ endpoint: saved, goal: savedGoal }) => {
-  endpoint.value = saved
-  goal.value = savedGoal
+chrome.storage.local.get({ goal: "", model: model.value }, (saved) => {
+  goal.value = saved.goal
+  model.value = saved.model
 })
 
-document.querySelector("#connect").addEventListener("click", async () => {
-  const value = endpoint.value.replace(/\/$/, "")
-  if (!/^http:\/\/127\.0\.0\.1(?::\d{1,5})?$/.test(value)) {
-    status.textContent = "Use an http://127.0.0.1 loopback endpoint"
+function request(type, payload = {}) {
+  const id = String(++sequence)
+  worker.postMessage({ id, type, ...payload })
+  return new Promise((resolve, reject) => pending.set(id, { resolve, reject }))
+}
+
+worker.addEventListener("message", ({ data }) => {
+  if (data.type === "progress") {
+    status.textContent = data.message
     return
   }
-  chrome.storage.local.set({ endpoint: value })
-  status.textContent = "Checking local service…"
+  const callback = pending.get(data.id)
+  if (!callback) return
+  pending.delete(data.id)
+  data.error ? callback.reject(new Error(data.error)) : callback.resolve(data)
+})
+
+load.addEventListener("click", async () => {
+  if (!navigator.gpu) {
+    status.textContent = "WebGPU is unavailable in this browser"
+    return
+  }
+  load.disabled = true
+  status.textContent = "Loading model into browser WebGPU…"
   try {
-    const response = await fetch(`${value}/health`, { cache: "no-store" })
-    const body = await response.json()
-    status.textContent = response.ok ? `Ready: ${body.model.source}` : body.error
-  } catch {
-    status.textContent = "Local service is unavailable"
+    await request("load", { modelId: model.value })
+    chrome.storage.local.set({ model: model.value })
+    ready = true
+    model.disabled = true
+    load.textContent = "Model ready"
+    status.textContent = "Model is loaded locally in this browser"
+  } catch (error) {
+    status.textContent = error.message
+    load.disabled = false
   }
 })
 
-document.querySelector("#decide").addEventListener("click", async () => {
-  const value = endpoint.value.replace(/\/$/, "")
+decide.addEventListener("click", async () => {
   const requestGoal = goal.value.trim()
-  if (!/^http:\/\/127\.0\.0\.1(?::\d{1,5})?$/.test(value) || !requestGoal) {
-    status.textContent = "Enter a goal and use the loopback endpoint"
+  if (!ready || !requestGoal) {
+    status.textContent = ready ? "Enter a goal" : "Load a browser model first"
     return
   }
-  chrome.storage.local.set({ endpoint: value, goal: requestGoal })
-  status.textContent = "Choosing one visible action…"
+  chrome.storage.local.set({ goal: requestGoal })
+  decide.disabled = true
+  status.textContent = "Scoring visible actions locally…"
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] })
     const snapshot = await chrome.tabs.sendMessage(tab.id, { type: "sembrowse-candidates" })
     if (snapshot.error) throw new Error(snapshot.error)
-    const criteria = Object.fromEntries(snapshot.candidates.map(({ id, description }) => [id, description]))
-    const response = await fetch(`${value}/v1/choose`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        state: snapshot.state,
-        questions: { action: { criteria, instructions: { goal: requestGoal, rule: "Choose one visible action that advances the goal" } } }
-      })
-    })
-    const body = await response.json()
-    if (!body.answers?.action) throw new Error(body.error || "No local decision returned")
-    const result = await chrome.tabs.sendMessage(tab.id, { type: "sembrowse-execute", id: body.answers.action.choice, fingerprint: snapshot.fingerprint })
-    status.textContent = result.error || `Selected: ${result.description}`
-  } catch {
-    status.textContent = "The selected tab could not run a local decision"
+    const result = await request("choose", { state: snapshot.state, goal: requestGoal, candidates: snapshot.candidates })
+    const executed = await chrome.tabs.sendMessage(tab.id, { type: "sembrowse-execute", id: result.choice, fingerprint: snapshot.fingerprint })
+    status.textContent = executed.error || `Selected: ${executed.description}`
+  } catch (error) {
+    status.textContent = error.message
+  } finally {
+    decide.disabled = false
   }
 })

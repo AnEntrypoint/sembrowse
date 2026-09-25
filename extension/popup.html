@@ -1,16 +1,19 @@
 <!doctype html>
 <html lang="en">
-  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sembrowse Local</title><link rel="stylesheet" href="popup.css"></head>
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sembrowse WebGPU</title><link rel="stylesheet" href="popup.css"></head>
   <body>
     <main>
-      <h1>Sembrowse Local</h1>
-      <label for="endpoint">Loopback endpoint</label>
-      <input id="endpoint" type="url" value="http://127.0.0.1:8787">
-      <button id="connect">Save and check</button>
+      <h1>Sembrowse WebGPU</h1>
+      <label for="model">Local browser model</label>
+      <select id="model">
+        <option value="qwen3-0.6b">Qwen3 0.6B · 639 MB</option>
+        <option value="minicpm5-2b">MiniCPM5 2B · 1.56 GB</option>
+      </select>
+      <button id="load">Load model in this browser</button>
       <label for="goal">Goal for this page</label>
       <textarea id="goal" rows="4" maxlength="256" placeholder="Describe the next visible action"></textarea>
       <button id="decide">Run one local decision</button>
-      <output id="status" aria-live="polite">Not checked</output>
+      <output id="status" aria-live="polite">Choose a model, then load it locally through WebGPU.</output>
     </main>
     <script src="popup.js"></script>
   </body>

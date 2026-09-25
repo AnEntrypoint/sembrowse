@@ -1,39 +1,32 @@
 # Sembrowse
 
-Sembrowse runs Jev Ultrafast browser decisions through a local SemIf-OpenJev scorer. It never needs a hosted choice-model API key. Model files stay on the machine you choose.
+Sembrowse is a portable browser extension that runs SemIf-style constrained choice directly on the GPU available to the browser. It has no Python installation, loopback server, API key, hosted inference request, or native helper.
+
+The extension packages the WebGPU-capable Wllama runtime and WebAssembly binary. A model is the only large asset not included in each release archive.
 
 ## Install
 
-Install [uv](https://docs.astral.sh/uv/) and Python 3.12 or 3.13 on Windows, macOS, or Linux. Python 3.14 is not supported by SemIf's pinned numerical stack. Install the package directly from a release source archive or a clone:
+Download the Chromium or Firefox archive from a GitHub release, extract it, and load the extracted directory as an unpacked extension.
 
-```text
-uv sync --locked
-```
+1. Open the extension popup on the page to control.
+2. Select a model and select **Load model**.
+3. Enter a goal and select **Choose and execute**.
 
-Choose a local model directory or a Hugging Face model identifier with an exact 40-character commit revision. Start the local loopback service:
+The first model load downloads an exact pinned GGUF file to the browser cache after the explicit button press. The browser performs all subsequent token generation and SemIf decision scoring locally. Once the model is cached, no network access is needed for inference. Releases do not redistribute model weights.
 
-```text
-uv run sembrowse-server --model /absolute/path/to/model --revision local-manifest-v1 --device cpu
-```
+WebGPU support is required. Chrome, Edge, and recent Firefox builds are the intended targets. The Qwen3 0.6B model is the smaller option; MiniCPM5 2B can make stronger choices on devices with sufficient graphics memory.
 
-For a remote Hugging Face model, replace `--model` with its identifier and `--revision` with the model commit SHA. The default `--device cpu` is the portable path. Use `--device cuda` for a single CUDA GPU or `--device mps` on an MPS-enabled Apple Silicon Mac.
+## What it does
 
-In a second terminal, start the Jev demo through the local decision adapter:
+For an explicit request on the active tab, Sembrowse collects up to 16 visible links and buttons. The local model receives the goal, compact page state, and labelled candidates. It uses constrained single-token log-probability readout to choose one candidate, then the content script validates that candidate's current fingerprint before executing the one selected action.
 
-```text
-uv run sembrowse-jev
-```
-
-The included browser extension only reaches `http://127.0.0.1:8787`. Download the Chromium or Firefox zip from a GitHub release, extract it, and load the extracted directory as an unpacked extension. Its popup asks for a goal, receives temporary access to the active tab, asks the local service to choose one visible button or link, and then performs that single selection.
-
-When Jev chooses a text field, `sembrowse-jev` prompts in the terminal for the exact value. It makes no hosted text-model call and does not require `TEXT_MODEL_API_KEY`.
+Page content never goes to a Sembrowse server because there is no Sembrowse server. The model download is the sole network boundary and is constrained to the selected pinned Hugging Face model asset.
 
 ## Releases
 
-Every push creates or updates a prerelease named `snapshot-<commit-sha>` with Chromium and Firefox MV3 archives plus `SHA256SUMS`. Release artifacts contain the extension and source only; model weights are fetched or selected locally at runtime.
+Every push creates or updates `snapshot-<commit-sha>` on GitHub Releases with Chromium and Firefox MV3 archives plus `SHA256SUMS`. CI syntax-checks the extension, creates the archives, and verifies that vendored runtime files are present in them.
 
-## Design
+## Model sources
 
-Jev's operation and target questions become SemIf choice rows. SemIf scores two to sixteen options at once. Larger target sets use a deterministic tournament: each group is scored, every group winner advances, and the final winner is one original target. Returned probability values are normalized from the complete tournament trace, so no candidate disappears silently.
-
-`sembrowse-server` exposes `GET /health` and `POST /v1/choose` on loopback. The latter accepts Jev-shaped `state` and `questions` data and returns answer objects containing `choice`, normalized `probabilities`, and `confidence`.
+- Qwen3 0.6B GGUF: [Qwen/Qwen3-0.6B-GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF)
+- MiniCPM5 2B GGUF: [openbmb/MiniCPM5-2B-GGUF](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)

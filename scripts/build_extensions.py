@@ -19,9 +19,17 @@ for browser in ("chromium", "firefox"):
     if browser == "chromium":
         manifest.pop("browser_specific_settings")
     with ZipFile(target, "w", ZIP_DEFLATED) as archive:
-        for path in sorted(source.iterdir()):
-            if path.name == "manifest.json":
-                archive.writestr(path.name, json.dumps(manifest, indent=2) + "\n")
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(source).as_posix()
+            if relative == "manifest.json":
+                archive.writestr(relative, json.dumps(manifest, indent=2) + "\n")
             else:
-                archive.write(path, path.name)
+                archive.write(path, relative)
+    with ZipFile(target) as archive:
+        names = set(archive.namelist())
+        required = {"manifest.json", "inference_worker.js", "vendor/wllama/index.js", "vendor/wllama/wasm/wllama.wasm"}
+        if required - names:
+            raise RuntimeError(f"missing packaged files: {sorted(required - names)}")
     print(target)

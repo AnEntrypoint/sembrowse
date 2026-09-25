@@ -31,7 +31,7 @@ if (!globalThis.__sembrowseLocalAttached) {
 
   const choices = () => Array.from(document.querySelectorAll("button, a[href], input[type=button], input[type=submit]"))
     .filter(visible)
-    .slice(0, 32)
+    .slice(0, 16)
     .map((element, index) => ({
       id: String(index + 1),
       description: `${element.tagName.toLowerCase()}: ${(element.innerText || element.value || element.getAttribute("aria-label") || "unnamed").trim().slice(0, 48)}`,
