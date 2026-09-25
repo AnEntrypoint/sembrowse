@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Controls a local Sembrowse decision service.",
   "action": {"default_popup": "popup.html"},
-  "permissions": ["storage"],
-  "host_permissions": ["http://127.0.0.1:8787/*"],
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*"],
   "browser_specific_settings": {"gecko": {"id": "sembrowse@anentrypoint.dev", "strict_min_version": "109.0"}}
 }

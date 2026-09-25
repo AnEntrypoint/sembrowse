@@ -73,7 +73,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision", required=True)
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--device", default="cpu")
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--port", default=8787, type=int)
     arguments = parser.parse_args()

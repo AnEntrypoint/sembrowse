@@ -7,6 +7,9 @@
       <label for="endpoint">Loopback endpoint</label>
       <input id="endpoint" type="url" value="http://127.0.0.1:8787">
       <button id="connect">Save and check</button>
+      <label for="goal">Goal for this page</label>
+      <textarea id="goal" rows="4" maxlength="256" placeholder="Describe the next visible action"></textarea>
+      <button id="decide">Run one local decision</button>
       <output id="status" aria-live="polite">Not checked</output>
     </main>
     <script src="popup.js"></script>
