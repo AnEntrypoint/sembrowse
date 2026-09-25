@@ -1,6 +1,6 @@
 # Sembrowse
 
-Sembrowse is a portable browser extension that runs SemIf-style constrained choice directly on the GPU available to the browser. It has no Python installation, loopback server, API key, hosted inference request, or native helper.
+Sembrowse is a portable browser extension that runs SemIf-style constrained choice directly on the GPU available to the browser. It has no Python installation, service API, API key, hosted inference request, or native helper.
 
 The extension packages the WebGPU-capable Wllama runtime and WebAssembly binary. A model is the only large asset not included in each release archive.
 
