@@ -9,8 +9,7 @@ The extension packages the WebGPU-capable Wllama runtime and WebAssembly binary.
 Download the Chromium or Firefox archive from a GitHub release, extract it, and load the extracted directory as an unpacked extension.
 
 1. Open the extension popup on the page to control.
-2. Select a model and select **Load model**.
-3. Enter a goal and select **Open local task runner**.
+2. Select a model, enter a goal, and select **Open local task runner**.
 
 The popup requests browser page access when a task starts. Grant it to let the runner continue through ordinary navigations; model inference remains local.
 

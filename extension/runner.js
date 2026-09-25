@@ -7,6 +7,7 @@ const pending = new Map()
 let sequence = 0
 let cancelled = false
 let activeRun = ""
+const pageOrigins = ["<all_urls>"]
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 const timed = (promise, milliseconds, message) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(message)), milliseconds))])
@@ -43,6 +44,26 @@ const snapshotFor = async (tabId) => {
   await timed(chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }), 15000, "Page observation timed out")
   return timed(chrome.tabs.sendMessage(tabId, { type: "sembrowse-candidates" }), 15000, "Page observation was interrupted")
 }
+const hasPageAccess = () => chrome.permissions.contains({ origins: pageOrigins })
+const isInjectablePage = (tab) => /^https?:\/\//i.test(tab?.url || "")
+const waitForTabComplete = (tabId, timeout = 30000) => new Promise((resolve) => {
+  let settled = false
+  const finish = (loaded) => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    chrome.tabs.onUpdated.removeListener(onUpdated)
+    resolve(loaded)
+  }
+  const onUpdated = (updatedTabId, changeInfo) => {
+    if (updatedTabId === tabId && changeInfo.status === "complete") finish(true)
+  }
+  const timer = setTimeout(() => finish(false), timeout)
+  chrome.tabs.onUpdated.addListener(onUpdated)
+  chrome.tabs.get(tabId).then((tab) => {
+    if (tab.status === "complete") finish(true)
+  }).catch(() => finish(false))
+})
 const settle = async (operation) => {
   if (operation === "TYPE_TEXT") return sleep(200)
   if (operation === "WAIT") return sleep(100)
@@ -69,12 +90,26 @@ async function run(task) {
     try {
       snapshot = await snapshotFor(task.tabId)
     } catch (error) {
-      if (/permission|Cannot access contents|Missing host/i.test(error.message)) {
+      if (!await hasPageAccess()) {
         status.textContent = "Page access was revoked; restart from the Sembrowse popup"
         return
       }
+      const tab = await chrome.tabs.get(task.tabId).catch(() => null)
+      if (!tab) {
+        status.textContent = "Task tab was closed; task stopped"
+        return
+      }
+      if (tab.status === "complete" && !isInjectablePage(tab)) {
+        status.textContent = "Page does not allow extension access; task stopped"
+        return
+      }
+      status.textContent = "Waiting for page navigation…"
+      const loaded = await waitForTabComplete(task.tabId)
+      if (!loaded) {
+        status.textContent = "Page did not finish loading; task stopped"
+        return
+      }
       appendTrace(`${step}. page changed; re-observing`)
-      await sleep(100)
       continue
     }
     if (snapshot.error) {
