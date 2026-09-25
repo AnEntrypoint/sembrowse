@@ -18,6 +18,13 @@ decide.addEventListener("click", async () => {
   status.textContent = "Opening the local task runner…"
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    const origins = ["<all_urls>"]
+    const granted = await chrome.permissions.contains({ origins }) || await chrome.permissions.request({ origins })
+    if (!granted) {
+      status.textContent = "Page access is required to continue across navigation"
+      decide.disabled = false
+      return
+    }
     const task = { id: crypto.randomUUID(), goal: taskGoal, modelId: model.value, tabId: tab.id }
     await chrome.storage.local.set({ goal: taskGoal, model: model.value, task })
     await chrome.windows.create({ url: chrome.runtime.getURL("runner.html"), type: "popup", width: 380, height: 620, focused: true })

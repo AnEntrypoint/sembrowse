@@ -5,6 +5,7 @@
   "description": "Runs SemIf decisions locally through WebGPU.",
   "action": {"default_popup": "popup.html"},
   "permissions": ["storage", "activeTab", "scripting", "windows"],
+  "optional_host_permissions": ["<all_urls>"],
   "host_permissions": ["https://huggingface.co/*"],
   "browser_specific_settings": {"gecko": {"id": "sembrowse@anentrypoint.dev", "strict_min_version": "109.0"}}
 }

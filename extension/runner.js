@@ -69,6 +69,10 @@ async function run(task) {
     try {
       snapshot = await snapshotFor(task.tabId)
     } catch (error) {
+      if (/permission|Cannot access contents|Missing host/i.test(error.message)) {
+        status.textContent = "Page access was revoked; restart from the Sembrowse popup"
+        return
+      }
       appendTrace(`${step}. page changed; re-observing`)
       await sleep(100)
       continue

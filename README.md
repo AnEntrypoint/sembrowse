@@ -10,7 +10,9 @@ Download the Chromium or Firefox archive from a GitHub release, extract it, and 
 
 1. Open the extension popup on the page to control.
 2. Select a model and select **Load model**.
-3. Enter a goal and select **Choose and execute**.
+3. Enter a goal and select **Open local task runner**.
+
+The popup requests browser page access when a task starts. Grant it to let the runner continue through ordinary navigations; model inference remains local.
 
 The first model load downloads an exact pinned GGUF file to the browser cache after the explicit button press. The browser performs all subsequent token generation and SemIf decision scoring locally. Once the model is cached, no network access is needed for inference. Releases do not redistribute model weights.
 
