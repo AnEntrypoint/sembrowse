@@ -1,0 +1,24 @@
+name: Release portable plugins
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/build_extensions.py "0.1.${{ github.run_number }}"
+      - run: sha256sum dist/* > dist/SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: snapshot-${{ github.sha }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "Sembrowse $TAG" --prerelease --generate-notes
+          gh release upload "$TAG" dist/* --clobber
