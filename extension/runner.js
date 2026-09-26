@@ -4,6 +4,17 @@ const status = document.querySelector("#status")
 const trace = document.querySelector("#trace")
 const worker = new Worker("inference_worker.js", { type: "module" })
 const pending = new Map()
+let resolveWorkerReady
+let rejectWorkerReady
+const workerReady = new Promise((resolve, reject) => {
+  resolveWorkerReady = resolve
+  rejectWorkerReady = reject
+})
+const workerReadyTimer = setTimeout(() => {
+  const message = "Local model worker did not become ready"
+  workerFailure = message
+  rejectWorkerReady(new Error(message))
+}, 30000)
 let sequence = 0
 let cancelled = false
 let activeRun = ""
@@ -18,7 +29,9 @@ const appendTrace = (message) => {
   trace.append(item)
   trace.scrollTop = trace.scrollHeight
 }
-const request = (type, payload = {}, timeout = 90000) => {
+const request = async (type, payload = {}, timeout = 90000) => {
+  if (workerFailure) return Promise.reject(new Error(workerFailure))
+  await workerReady
   if (workerFailure) return Promise.reject(new Error(workerFailure))
   const id = String(++sequence)
   return new Promise((resolve, reject) => {
@@ -40,6 +53,11 @@ const rejectPending = (message) => {
 }
 
 worker.addEventListener("message", ({ data }) => {
+  if (data.type === "worker_ready") {
+    clearTimeout(workerReadyTimer)
+    resolveWorkerReady()
+    return
+  }
   if (data.type === "progress") {
     status.textContent = data.message
     return
@@ -52,12 +70,18 @@ worker.addEventListener("message", ({ data }) => {
 
 worker.addEventListener("error", (event) => {
   const message = event.error?.message || event.message || "Local model worker failed to start"
+  clearTimeout(workerReadyTimer)
+  workerFailure = message
+  rejectWorkerReady(new Error(message))
   rejectPending(message)
   status.textContent = message
 })
 
 worker.addEventListener("messageerror", () => {
   const message = "Local model worker returned an unreadable response"
+  clearTimeout(workerReadyTimer)
+  workerFailure = message
+  rejectWorkerReady(new Error(message))
   rejectPending(message)
   status.textContent = message
 })

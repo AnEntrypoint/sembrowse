@@ -185,3 +185,5 @@ self.addEventListener("message", async ({ data }) => {
     send(data.id, { error: error?.message ?? String(error) })
   }
 })
+
+self.postMessage({ type: "worker_ready" })
