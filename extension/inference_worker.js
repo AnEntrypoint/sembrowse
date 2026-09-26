@@ -26,6 +26,7 @@ async function load(id, modelId) {
     n_ctx: 2048,
     n_batch: 512,
     n_gpu_layers: 999,
+    useCache: true,
     cache_prompt: false,
     progressCallback: ({ loaded, total }) => self.postMessage({ type: "progress", message: total ? `Loading model ${(loaded / total * 100).toFixed(0)}%` : "Loading model" })
   })
