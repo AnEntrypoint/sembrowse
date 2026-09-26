@@ -21,12 +21,14 @@ const getRuntime = () => {
 }
 const models = {
   "qwen3-0.6b": { url: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf", labelBase: 32 },
-  "minicpm5-2b": { url: "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf", labelBase: 54 }
+  "minicpm5-2b": { url: "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf", labelBase: 54 },
+  "qwen3.5-4b": { url: "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/4168f45a16a1290d65a4ec0fa312ae917a4c15d6/Qwen_Qwen3.5-4B-Q4_K_M.gguf", labelBase: 32 }
 }
 let engine
 let selected
 let loading
 let loadingModelId = ""
+let runtimeMode = ""
 const labelsFor = (count) => Array.from({ length: count }, (_, index) => String.fromCharCode(65 + index))
 const send = (id, payload) => self.postMessage({ id, ...payload })
 const reportProgress = (message) => self.postMessage({ type: "progress", message })
@@ -58,12 +60,15 @@ const waitAtStage = async (message, operation) => {
 async function initializeModel() {
   const { Wllama, LoggerWithoutDebug } = await waitAtStage("Preparing local model runtime…", () => getRuntime())
   const loadedEngine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
-  if (!await supportsWebGPU()) {
+  runtimeMode = await supportsWebGPU() ? "webgpu" : "compatibility"
+  if (runtimeMode === "compatibility") {
     loadedEngine.setCompat({
       worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,
       wasm: new URL("./vendor/wllama/compat/wllama.wasm", self.location.href).href
     }, "always")
     reportProgress("WebGPU is unavailable; using the local compatibility runtime…")
+  } else {
+    reportProgress("WebGPU adapter is ready; using the local WebGPU runtime…")
   }
   let loaded = false
   try {
@@ -75,7 +80,8 @@ async function initializeModel() {
       cache_prompt: false,
       progressCallback: ({ loaded, total }) => setStage(total && loaded >= total ? "Caching the downloaded model locally…" : total ? `Downloading model: ${Math.round(loaded / total * 100)}%` : `Downloading model: ${loaded} bytes`)
     }))
-    await waitAtStage("Warming the local WebGPU model…", () => loadedEngine.createChatCompletion({
+    const runtimeLabel = runtimeMode === "webgpu" ? "WebGPU" : "compatibility"
+    await waitAtStage(`Warming the local ${runtimeLabel} model…`, () => loadedEngine.createChatCompletion({
       messages: [{ role: "system", content: "Reply with READY." }, { role: "user", content: "READY" }],
       max_tokens: 1,
       temperature: 0
@@ -85,11 +91,11 @@ async function initializeModel() {
     if (!loaded) await loadedEngine.exit().catch(() => undefined)
   }
   engine = loadedEngine
-  reportProgress("Local WebGPU model is ready.")
+  reportProgress(`Local ${runtimeMode === "webgpu" ? "WebGPU" : "compatibility"} model is ready.`)
 }
 
 async function load(id, modelId) {
-  if (engine) return send(id, { type: "ready" })
+  if (engine) return send(id, { type: "ready", runtimeMode })
   if (loading && loadingModelId !== modelId) return send(id, { error: "A different browser model is already loading" })
   if (!loading) {
     selected = models[modelId]
@@ -101,7 +107,7 @@ async function load(id, modelId) {
     })
   }
   await loading
-  send(id, { type: "ready" })
+  send(id, { type: "ready", runtimeMode })
 }
 
 async function chooseOne(goal, state, candidates, instruction, budget) {

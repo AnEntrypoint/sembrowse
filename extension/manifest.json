@@ -1,11 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Sembrowse WebGPU",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "description": "Runs SemIf decisions locally through WebGPU.",
   "action": {"default_popup": "popup.html"},
   "permissions": ["storage", "activeTab", "scripting", "tabs", "windows"],
   "host_permissions": ["<all_urls>"],
+  "cross_origin_embedder_policy": {"value": "require-corp"},
+  "cross_origin_opener_policy": {"value": "same-origin"},
   "content_security_policy": {"extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"},
   "browser_specific_settings": {"gecko": {"id": "sembrowse@anentrypoint.dev", "strict_min_version": "109.0"}}
 }

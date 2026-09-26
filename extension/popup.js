@@ -5,7 +5,8 @@ const decide = document.querySelector("#decide")
 const status = document.querySelector("#status")
 const modelProfiles = {
   "qwen3-0.6b": "Compact tier: 639 MB download. Best for smaller devices and quick local tasks.",
-  "minicpm5-2b": "Desktop tier: 1.56 GB download. Reserve persistent storage and GPU memory before loading."
+  "minicpm5-2b": "Desktop tier: 1.56 GB download. Reserve persistent storage and GPU memory before loading.",
+  "qwen3.5-4b": "High-memory tier: 3.01 GB download. Reserve several gigabytes of browser storage and GPU memory before loading."
 }
 const showModelInfo = () => {
   modelInfo.textContent = modelProfiles[model.value]

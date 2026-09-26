@@ -5,7 +5,8 @@ const status = document.querySelector("#status")
 const trace = document.querySelector("#trace")
 const modelArtifacts = {
   "qwen3-0.6b": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
-  "minicpm5-2b": "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf"
+  "minicpm5-2b": "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf",
+  "qwen3.5-4b": "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/4168f45a16a1290d65a4ec0fa312ae917a4c15d6/Qwen_Qwen3.5-4B-Q4_K_M.gguf"
 }
 const runtimeVersion = "wllama 3.6.1"
 const worker = new Worker(`inference_worker.js?v=${chrome.runtime.getManifest().version}`, { type: "module" })
@@ -164,8 +165,9 @@ async function run(task) {
   }
   download.disabled = true
   goalOutput.textContent = task.goal
-  setStatus("Loading local WebGPU model…")
-  await request("load", { modelId: task.modelId }, 600000)
+  setStatus("Loading local model…")
+  const loadedModel = await request("load", { modelId: task.modelId }, 600000)
+  evidence.runtimeMode = loadedModel.runtimeMode
   let modelCalls = 0
   let unchanged = 0
   let previousState = ""
