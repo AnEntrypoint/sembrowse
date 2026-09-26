@@ -1,13 +1,24 @@
 const goal = document.querySelector("#goal")
 const model = document.querySelector("#model")
+const modelInfo = document.querySelector("#model-info")
 const decide = document.querySelector("#decide")
 const status = document.querySelector("#status")
+const modelProfiles = {
+  "qwen3-0.6b": "Compact tier: 639 MB download. Best for smaller devices and quick local tasks.",
+  "minicpm5-2b": "Desktop tier: 1.56 GB download. Reserve persistent storage and GPU memory before loading."
+}
+const showModelInfo = () => {
+  modelInfo.textContent = modelProfiles[model.value]
+}
 
 chrome.storage.local.get({ goal: "", model: model.value, lastTaskStatus: null }, (saved) => {
   goal.value = saved.goal
   model.value = saved.model
+  showModelInfo()
   if (saved.lastTaskStatus) status.textContent = saved.lastTaskStatus.message
 })
+
+model.addEventListener("change", showModelInfo)
 
 decide.addEventListener("click", async () => {
   const taskGoal = goal.value.trim()

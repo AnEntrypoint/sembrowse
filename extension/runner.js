@@ -3,6 +3,11 @@ const stop = document.querySelector("#stop")
 const download = document.querySelector("#download")
 const status = document.querySelector("#status")
 const trace = document.querySelector("#trace")
+const modelArtifacts = {
+  "qwen3-0.6b": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
+  "minicpm5-2b": "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf"
+}
+const runtimeVersion = "wllama 3.6.1"
 const worker = new Worker("inference_worker.js", { type: "module" })
 const pending = new Map()
 let evidence = null
@@ -107,9 +112,9 @@ worker.addEventListener("messageerror", () => {
   setStatus(message)
 })
 
-const snapshotFor = async (tabId) => {
+const snapshotFor = async (tabId, goal) => {
   await timed(chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }), 15000, "Page observation timed out")
-  return timed(chrome.tabs.sendMessage(tabId, { type: "sembrowse-candidates" }), 15000, "Page observation was interrupted")
+  return timed(chrome.tabs.sendMessage(tabId, { type: "sembrowse-candidates", goal }), 15000, "Page observation was interrupted")
 }
 const hasPageAccess = () => chrome.permissions.contains({ origins: pageOrigins })
 const isInjectablePage = (tab) => /^https?:\/\//i.test(tab?.url || "")
@@ -149,6 +154,8 @@ async function run(task) {
     id: task.id,
     goal: task.goal,
     modelId: task.modelId,
+    modelArtifact: modelArtifacts[task.modelId] || null,
+    runtimeVersion,
     tabId: task.tabId,
     windowId: task.windowId,
     startedAt: new Date().toISOString(),
@@ -163,10 +170,12 @@ async function run(task) {
   let previousState = ""
   let priorActionWasNonWait = false
   const history = []
+  const navigationGoal = /\b(browse|go|navigate|open|visit)\b/i.test(task.goal)
+  let initialPageUrl = ""
   for (let step = 1; step <= 60 && !cancelled && activeRun === task.id; step += 1) {
     let snapshot
     try {
-      snapshot = await snapshotFor(task.tabId)
+      snapshot = await snapshotFor(task.tabId, task.goal)
     } catch (error) {
       if (!await hasPageAccess()) {
         setStatus("Page access was revoked; restart from the Sembrowse popup")
@@ -194,6 +203,7 @@ async function run(task) {
       setStatus(snapshot.error)
       return
     }
+    initialPageUrl ||= snapshot.state.url
     const stateKey = JSON.stringify({ url: snapshot.state.url, title: snapshot.state.title, text: snapshot.state.text, scroll: snapshot.state.scroll, candidates: snapshot.candidates.map(({ id, description, mode, options }) => ({ id, description, mode, options })) })
     unchanged = priorActionWasNonWait && stateKey === previousState ? unchanged + 1 : 0
     previousState = stateKey
@@ -205,9 +215,16 @@ async function run(task) {
       setStatus("Task stopped at the 120 local model-call limit")
       return
     }
-    const result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls })
+    const result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: !navigationGoal || snapshot.state.url !== initialPageUrl })
     if (cancelled || activeRun !== task.id) return
     modelCalls += result.calls || 0
+    if (result.operation === "DONE" && navigationGoal && snapshot.state.url === initialPageUrl) {
+      appendTrace(`${step}. rejected DONE: navigation goal still has the starting URL`)
+      history.push("DONE rejected: the requested navigation has not changed the URL")
+      if (history.length > 6) history.shift()
+      priorActionWasNonWait = false
+      continue
+    }
     if (result.operation === "DONE" || result.operation === "BLOCKED") {
       appendTrace(`${step}. ${result.operation} (${(result.probability * 100).toFixed(0)}%)`)
       setStatus(result.operation === "DONE" ? "Task completed locally" : "Task blocked; review the visible page state")

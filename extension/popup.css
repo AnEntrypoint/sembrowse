@@ -3,4 +3,5 @@ main { display: grid; gap: 10px; padding: 16px; }
 h1 { font-size: 16px; margin: 0; }
 input, textarea, select, button { box-sizing: border-box; padding: 8px; width: 100%; }
 output { min-height: 20px; overflow-wrap: anywhere; }
+p { color: #4a4a4a; font-size: 12px; line-height: 1.35; margin: 0; }
 ol { margin: 0; max-height: 180px; overflow: auto; padding-left: 20px; }

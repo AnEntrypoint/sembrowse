@@ -42,10 +42,27 @@ if (!globalThis.__sembrowseLocalAttached) {
     return "CLICK"
   }
 
-  const choices = () => Array.from(document.querySelectorAll("button, a[href], input, textarea, select, [role=button], [role=combobox], [contenteditable=true]"))
+  const selectable = (element) => {
+    if (visible(element)) return true
+    if (!element.matches("a[href]")) return false
+    const style = getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    return !element.disabled && style.display !== "none" && style.visibility === "visible" && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0
+  }
+
+  const relevance = (element, goal) => {
+    const terms = String(goal || "").toLowerCase().match(/[a-z0-9]{3,}/g) || []
+    const text = [element.textContent, element.getAttribute("aria-label"), element.getAttribute("title"), element.href].join(" ").toLowerCase()
+    const navigationGoal = /\b(browse|go|navigate|open|visit)\b/.test(String(goal || "").toLowerCase())
+    return terms.reduce((score, term) => score + (new RegExp(`\\b${term}\\b`).test(text) ? 1 : 0), 0) + (navigationGoal && element.matches("a[href]") ? 1 : 0)
+  }
+
+  const sample = (elements) => elements.length <= 16 ? elements : [...elements.slice(0, 12), ...elements.filter((element) => element.matches("a[href]")).slice(-4).filter((element) => !elements.slice(0, 12).includes(element))]
+
+  const choices = (goal) => sample(Array.from(document.querySelectorAll("button, a[href], input, textarea, select, [role=button], [role=combobox], [contenteditable=true]"))
     .filter((element) => !element.matches("input[type=hidden], input[type=file], input[type=password]"))
-    .filter(visible)
-    .slice(0, 16)
+    .filter(selectable)
+    .sort((left, right) => relevance(right, goal) - relevance(left, goal)))
     .map((element, index) => ({
       id: String(index + 1),
       mode: modeFor(element),
@@ -56,7 +73,7 @@ if (!globalThis.__sembrowseLocalAttached) {
     }))
 
   chrome.runtime.onMessage.addListener((message, _, sendResponse) => {
-    const candidates = choices()
+    const candidates = choices(message.goal)
     if (message.type === "sembrowse-candidates") {
       snapshot = { candidates, fingerprint: crypto.randomUUID() }
       sendResponse({
@@ -81,7 +98,7 @@ if (!globalThis.__sembrowseLocalAttached) {
         return
       }
       const selected = snapshot.candidates.find(({ id }) => id === message.id)
-      if (!selected || !selected.element.isConnected || !visible(selected.element)) {
+      if (!selected || !selected.element.isConnected || !selectable(selected.element)) {
         sendResponse({ error: "The page changed before the local decision could run" })
         return
       }
@@ -132,6 +149,7 @@ if (!globalThis.__sembrowseLocalAttached) {
         sendResponse({ description: `${selected.description}: ${option.text}`, changed: true })
         return
       }
+      selected.element.scrollIntoView({ block: "center", inline: "nearest" })
       selected.element.click()
       sendResponse({ description: selected.description, changed: true })
     }

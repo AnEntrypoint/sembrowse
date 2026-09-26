@@ -144,7 +144,7 @@ async function typeText(goal, state, target, budget) {
   return text || { error: "The local model did not generate field text" }
 }
 
-async function decide(id, state, goal, candidates, remainingCalls) {
+async function decide(id, state, goal, candidates, remainingCalls, allowDone) {
   const budget = { calls: 0, limit: Math.min(Math.max(Number(remainingCalls) || 0, 0), 4) }
   const available = Array.isArray(candidates) ? candidates : []
   const operations = [
@@ -154,7 +154,7 @@ async function decide(id, state, goal, candidates, remainingCalls) {
     state.scroll?.top > 0 && { id: "SCROLL_UP", description: "SCROLL_UP to reveal earlier page content" },
     state.scroll?.top + state.scroll?.viewport < state.scroll?.height && { id: "SCROLL_DOWN", description: "SCROLL_DOWN to reveal later page content" },
     { id: "WAIT", description: "WAIT for the current page to settle" },
-    { id: "DONE", description: "DONE because the goal is visibly complete" },
+    allowDone && { id: "DONE", description: "DONE because the goal is visibly complete" },
     { id: "BLOCKED", description: "BLOCKED because no safe visible action can advance the goal" }
   ].filter(Boolean)
   const operation = await chooseOne(goal, state, operations, "Allowed operations:", budget)
@@ -180,7 +180,7 @@ async function decide(id, state, goal, candidates, remainingCalls) {
 self.addEventListener("message", async ({ data }) => {
   try {
     if (data.type === "load") await load(data.id, data.modelId)
-    if (data.type === "decide") await decide(data.id, data.state, data.goal, data.candidates, data.remainingCalls)
+    if (data.type === "decide") await decide(data.id, data.state, data.goal, data.candidates, data.remainingCalls, data.allowDone)
   } catch (error) {
     send(data.id, { error: error?.message ?? String(error) })
   }

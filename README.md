@@ -1,5 +1,11 @@
 # Sembrowse
 
+[![Latest release](https://img.shields.io/github/v/release/AnEntrypoint/sembrowse?display_name=tag&sort=semver)](https://github.com/AnEntrypoint/sembrowse/releases/latest)
+
+## Latest stable release
+
+Install the current stable extension from [GitHub Releases](https://github.com/AnEntrypoint/sembrowse/releases/latest). That link always resolves to the newest published stable version; each release contains Chromium and Firefox archives plus `SHA256SUMS` for verification.
+
 Sembrowse is a portable browser extension that runs SemIf-style constrained choice directly on the GPU available to the browser. It has no Python installation, service API, API key, hosted inference request, or native helper.
 
 The extension packages Wllama's WebGPU and compatibility runtimes, including their WebAssembly binaries. Model weights are intentionally not included in each release archive. The first load downloads the selected model into persistent browser storage; later loads reopen that browser cache without another model download.
