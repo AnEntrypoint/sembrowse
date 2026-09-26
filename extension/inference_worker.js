@@ -22,8 +22,28 @@ const models = {
 }
 let engine
 let selected
+let loading
+let loadingModelId = ""
 const labelsFor = (count) => Array.from({ length: count }, (_, index) => String.fromCharCode(65 + index))
 const send = (id, payload) => self.postMessage({ id, ...payload })
+const reportProgress = (message) => self.postMessage({ type: "progress", message })
+const waitAtStage = async (message, operation) => {
+  let current = message
+  let elapsed = 0
+  reportProgress(current)
+  const timer = setInterval(() => {
+    elapsed += 15
+    reportProgress(`${current} (${elapsed}s)`)
+  }, 15000)
+  try {
+    return await operation((next) => {
+      current = next
+      reportProgress(current)
+    })
+  } finally {
+    clearInterval(timer)
+  }
+}
 const softmax = (values) => {
   const maximum = Math.max(...values)
   const weights = values.map((value) => Math.exp(value - maximum))
@@ -31,38 +51,49 @@ const softmax = (values) => {
   return weights.map((value) => value / total)
 }
 
-async function load(id, modelId) {
-  if (engine) return send(id, { type: "ready" })
-  selected = models[modelId]
-  if (!selected) return send(id, { error: "Choose a supported browser model" })
-  self.postMessage({ type: "progress", message: "Preparing local model runtime…" })
-  const { Wllama, LoggerWithoutDebug } = await getRuntime()
+async function initializeModel() {
+  const { Wllama, LoggerWithoutDebug } = await waitAtStage("Preparing local model runtime…", () => getRuntime())
   const loadedEngine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
   loadedEngine.setCompat({
     worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,
     wasm: new URL("./vendor/wllama/compat/wllama.wasm", self.location.href).href
   }, "always")
-  self.postMessage({ type: "progress", message: "Downloading or opening the browser-cached model…" })
   let loaded = false
   try {
-    await loadedEngine.loadModelFromUrl(selected.url, {
+    await waitAtStage("Opening the browser-cached model…", (setStage) => loadedEngine.loadModelFromUrl(selected.url, {
       n_ctx: 2048,
       n_batch: 512,
       n_gpu_layers: 999,
       useCache: true,
       cache_prompt: false,
-      progressCallback: ({ loaded, total }) => self.postMessage({ type: "progress", message: total ? `Downloading model: ${Math.round(loaded / total * 100)}%` : `Downloading model: ${loaded} bytes` })
-    })
-    await loadedEngine.createChatCompletion({
+      progressCallback: ({ loaded, total }) => setStage(total && loaded >= total ? "Caching the downloaded model locally…" : total ? `Downloading model: ${Math.round(loaded / total * 100)}%` : `Downloading model: ${loaded} bytes`)
+    }))
+    await waitAtStage("Warming the local WebGPU model…", () => loadedEngine.createChatCompletion({
       messages: [{ role: "system", content: "Reply with READY." }, { role: "user", content: "READY" }],
       max_tokens: 1,
       temperature: 0
-    })
+    }))
     loaded = true
   } finally {
     if (!loaded) await loadedEngine.exit().catch(() => undefined)
   }
   engine = loadedEngine
+  reportProgress("Local WebGPU model is ready.")
+}
+
+async function load(id, modelId) {
+  if (engine) return send(id, { type: "ready" })
+  if (loading && loadingModelId !== modelId) return send(id, { error: "A different browser model is already loading" })
+  if (!loading) {
+    selected = models[modelId]
+    if (!selected) return send(id, { error: "Choose a supported browser model" })
+    loadingModelId = modelId
+    loading = initializeModel().finally(() => {
+      loading = undefined
+      loadingModelId = ""
+    })
+  }
+  await loading
   send(id, { type: "ready" })
 }
 

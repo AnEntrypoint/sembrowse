@@ -9,7 +9,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 root = Path(__file__).resolve().parents[1]
 source = root / "extension"
 output = root / "dist"
-version = sys.argv[1] if len(sys.argv) == 2 else "0.1.0"
+version = sys.argv[1] if len(sys.argv) == 2 else json.loads((source / "manifest.json").read_text())["version"]
 output.mkdir(exist_ok=True)
 
 for browser in ("chromium", "firefox"):
