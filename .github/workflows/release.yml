@@ -9,13 +9,21 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: sembrowse-release
-  cancel-in-progress: false
-
 jobs:
-  release:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - id: version
+        run: node -p "'value=' + require('./extension/manifest.json').version" >> "$GITHUB_OUTPUT"
+  release:
+    needs: version
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sembrowse-release-v${{ needs.version.outputs.value }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -25,15 +33,11 @@ jobs:
       - run: node --check extension/popup.js
       - run: node --check extension/runner.js
       - run: node --check extension/inference_worker.js
-      - id: version
-        run: |
-          VERSION="$(python3 -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')"
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
-      - run: python scripts/build_extensions.py "${{ steps.version.outputs.value }}"
+      - run: python scripts/build_extensions.py "${{ needs.version.outputs.value }}"
       - run: cd dist && sha256sum *.zip > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v${{ steps.version.outputs.value }}
+          TAG: v${{ needs.version.outputs.value }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             exit 0
