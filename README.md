@@ -33,7 +33,7 @@ Every push creates or updates `snapshot-<commit-sha>` on GitHub Releases with Ch
 
 Sembrowse is a local browser-extension alternative to Jev Ultrafast's dynamic browser-agent loop. Each step observes a fresh, indexed list of visible controls and accepts only an operation compatible with the current target: `CLICK`, `TYPE_TEXT`, `SELECT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, or `BLOCKED`.
 
-Runs refresh their page observation before every action, reject stale controls safely, and report their terminal outcome in the runner window. Select **Download task evidence** after a run to save its goal, action/status history, terminal state, and a current-tab screenshot when Chrome permits capture. Evidence is downloaded only by this explicit user action.
+Runs refresh their page observation before every action, reject stale controls safely, and report their terminal outcome in the runner window. Select **Download task evidence** after a run to save its goal, action/status history, and terminal state. Evidence is downloaded only by this explicit user action.
 
 ## Model sources
 

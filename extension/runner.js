@@ -39,12 +39,9 @@ const appendTrace = (message) => {
   if (evidence) evidence.events.push({ type: "trace", message, at: new Date().toISOString() })
   trace.scrollTop = trace.scrollHeight
 }
-const downloadEvidence = async () => {
-  if (!evidence) return
+const downloadEvidence = () => {
+  if (!evidence?.finishedAt) return
   const payload = { ...evidence, exportedAt: new Date().toISOString() }
-  if (evidence.windowId !== undefined) {
-    payload.screenshot = await chrome.tabs.captureVisibleTab(evidence.windowId, { format: "png" }).catch(() => null)
-  }
   const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }))
   const anchor = document.createElement("a")
   anchor.href = url
@@ -157,7 +154,7 @@ async function run(task) {
     startedAt: new Date().toISOString(),
     events: []
   }
-  download.disabled = false
+  download.disabled = true
   goalOutput.textContent = task.goal
   setStatus("Loading local WebGPU model…")
   await request("load", { modelId: task.modelId }, 600000)
@@ -259,5 +256,6 @@ chrome.storage.local.get({ task: null }).then(({ task }) => {
     }
     await chrome.storage.local.remove("task")
     stop.disabled = true
+    download.disabled = !evidence?.finishedAt
   })
 })
