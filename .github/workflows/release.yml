@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: sembrowse-release-${{ github.ref }}
+  group: sembrowse-release
   cancel-in-progress: false
 
 jobs:
