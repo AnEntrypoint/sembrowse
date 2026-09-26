@@ -182,7 +182,7 @@ async function run(task) {
     if (!authorGoal) return true
     try {
       const destination = new URL(url)
-      return !!authorHandle && destination.hostname === "github.com" && destination.pathname === `/${authorHandle}`
+      return !!authorHandle && destination.hostname.toLowerCase() === "github.com" && destination.pathname.replace(/\/+$/, "").toLowerCase() === `/${authorHandle.toLowerCase()}`
     } catch {
       return false
     }
@@ -236,19 +236,37 @@ async function run(task) {
       setStatus("Task stopped at the 120 local model-call limit")
       return
     }
-    const candidateUrl = (candidate) => candidate.description.match(/https:\/\/\S+/)?.[0] || ""
+    const candidateUrl = (candidate) => candidate.description.match(/https?:\/\/\S+/i)?.[0] || ""
     const githubPath = (candidate) => {
       try {
         const destination = new URL(candidateUrl(candidate))
-        return destination.hostname === "github.com" ? destination.pathname.split("/").filter(Boolean) : []
+        return destination.hostname.toLowerCase() === "github.com" ? destination.pathname.split("/").filter(Boolean) : []
       } catch {
         return []
       }
     }
-    const profileCandidate = authorGoal && authorHandle && snapshot.candidates.find((candidate) => githubPath(candidate).join("/") === authorHandle)
+    const profileCandidate = authorGoal && authorHandle && snapshot.candidates.find((candidate) => githubPath(candidate).map((part) => part.toLowerCase()).join("/") === authorHandle.toLowerCase())
     const repositoryCandidate = authorGoal && !authorHandle && new URL(snapshot.state.url).hostname !== "github.com" && snapshot.candidates.find((candidate) => githubPath(candidate).length >= 2)
     const clickCandidates = snapshot.candidates.filter((candidate) => candidate.mode === "CLICK")
     const singleClickGoal = /\b(click|browse|go|navigate|open|visit)\b/i.test(task.goal)
+    let githubPagesAuthor = ""
+    if (authorGoal && !authorHandle) {
+      try {
+        githubPagesAuthor = new URL(snapshot.state.url).hostname.match(/^([a-z0-9-]+)\.github\.io$/i)?.[1]?.toLowerCase() || ""
+      } catch {}
+    }
+    if (githubPagesAuthor) {
+      authorHandle = githubPagesAuthor
+      appendTrace(`${step}. github-pages-author: ${authorHandle}`)
+      setStatus("Opening the author’s GitHub profile…")
+      await chrome.tabs.update(task.tabId, { url: `https://github.com/${authorHandle}` })
+      if (!await waitForTabComplete(task.tabId)) {
+        setStatus("Author profile did not finish loading")
+        return
+      }
+      priorActionWasNonWait = true
+      continue
+    }
     let result
     if (canCompleteAt(snapshot.state.url)) result = { operation: "DONE", probability: 1, calls: 0, policy: authorGoal ? "author-profile-url" : "navigation-url-change" }
     else if (profileCandidate || repositoryCandidate) {
