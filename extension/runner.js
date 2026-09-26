@@ -178,7 +178,7 @@ async function run(task) {
   let initialPageUrl = ""
   let authorHandle = ""
   const canCompleteAt = (url) => {
-    if (!navigationGoal || url === initialPageUrl) return !navigationGoal
+    if (!navigationGoal || url === initialPageUrl) return false
     if (!authorGoal) return true
     try {
       const destination = new URL(url)
@@ -247,14 +247,28 @@ async function run(task) {
     }
     const profileCandidate = authorGoal && authorHandle && snapshot.candidates.find((candidate) => githubPath(candidate).join("/") === authorHandle)
     const repositoryCandidate = authorGoal && !authorHandle && new URL(snapshot.state.url).hostname !== "github.com" && snapshot.candidates.find((candidate) => githubPath(candidate).length >= 2)
+    const clickCandidates = snapshot.candidates.filter((candidate) => candidate.mode === "CLICK")
+    const singleClickGoal = /\b(click|browse|go|navigate|open|visit)\b/i.test(task.goal)
     let result
-    if (canCompleteAt(snapshot.state.url)) result = { operation: "DONE", probability: 1, calls: 0, policy: "author-profile-url" }
+    if (canCompleteAt(snapshot.state.url)) result = { operation: "DONE", probability: 1, calls: 0, policy: authorGoal ? "author-profile-url" : "navigation-url-change" }
     else if (profileCandidate || repositoryCandidate) {
       const candidate = profileCandidate || repositoryCandidate
       result = { operation: candidate.mode, id: candidate.id, probability: 1, calls: 0, policy: "author-navigation" }
+    } else if (singleClickGoal && clickCandidates.length === 1) {
+      const candidate = clickCandidates[0]
+      result = { operation: candidate.mode, id: candidate.id, probability: 1, calls: 0, policy: "single-visible-click" }
     } else {
       setStatus("Choosing the next local browser action…")
-      result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: false }, 180000)
+      let decisionElapsed = 0
+      const decisionTimer = setInterval(() => {
+        decisionElapsed += 5
+        setStatus(`Choosing the next local browser action… (${decisionElapsed}s)`)
+      }, 5000)
+      try {
+        result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: false }, 90000)
+      } finally {
+        clearInterval(decisionTimer)
+      }
     }
     if (cancelled || activeRun !== task.id) return
     modelCalls += result.calls || 0
