@@ -12,6 +12,9 @@ const getRuntime = () => {
         clearTimeout(timer)
         reject(error)
       })
+    }).catch((error) => {
+      runtime = undefined
+      throw error
     })
   }
   return runtime
