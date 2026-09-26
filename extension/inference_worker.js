@@ -1,6 +1,21 @@
 const browserFetch = self.fetch.bind(self)
 self.fetch = (input, init = {}) => browserFetch(input, { ...init, referrerPolicy: "no-referrer" })
-const { Wllama, LoggerWithoutDebug } = await import("./vendor/wllama/index.js")
+let runtime
+const getRuntime = () => {
+  if (!runtime) {
+    runtime = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Local model runtime did not initialize within 30 seconds")), 30000)
+      import("./vendor/wllama/index.js").then(({ Wllama, LoggerWithoutDebug }) => {
+        clearTimeout(timer)
+        resolve({ Wllama, LoggerWithoutDebug })
+      }, (error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
+    })
+  }
+  return runtime
+}
 const models = {
   "qwen3-0.6b": { url: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf", labelBase: 32 },
   "minicpm5-2b": { url: "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf", labelBase: 54 }
@@ -20,6 +35,8 @@ async function load(id, modelId) {
   if (engine) return send(id, { type: "ready" })
   selected = models[modelId]
   if (!selected) return send(id, { error: "Choose a supported browser model" })
+  self.postMessage({ type: "progress", message: "Preparing local model runtime…" })
+  const { Wllama, LoggerWithoutDebug } = await getRuntime()
   const loadedEngine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
   loadedEngine.setCompat({
     worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,

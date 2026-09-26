@@ -7,6 +7,7 @@ const pending = new Map()
 let sequence = 0
 let cancelled = false
 let activeRun = ""
+let workerFailure = ""
 const pageOrigins = ["<all_urls>"]
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -18,15 +19,24 @@ const appendTrace = (message) => {
   trace.scrollTop = trace.scrollHeight
 }
 const request = (type, payload = {}, timeout = 90000) => {
+  if (workerFailure) return Promise.reject(new Error(workerFailure))
   const id = String(++sequence)
-  worker.postMessage({ id, type, ...payload })
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id)
       reject(new Error(`Local model ${type} timed out`))
     }, timeout)
     pending.set(id, { resolve: (data) => { clearTimeout(timer); resolve(data) }, reject: (error) => { clearTimeout(timer); reject(error) } })
+    worker.postMessage({ id, type, ...payload })
   })
+}
+
+const rejectPending = (message) => {
+  workerFailure = message
+  for (const [id, callback] of pending) {
+    pending.delete(id)
+    callback.reject(new Error(message))
+  }
 }
 
 worker.addEventListener("message", ({ data }) => {
@@ -38,6 +48,18 @@ worker.addEventListener("message", ({ data }) => {
   if (!callback) return
   pending.delete(data.id)
   data.error ? callback.reject(new Error(data.error)) : callback.resolve(data)
+})
+
+worker.addEventListener("error", (event) => {
+  const message = event.error?.message || event.message || "Local model worker failed to start"
+  rejectPending(message)
+  status.textContent = message
+})
+
+worker.addEventListener("messageerror", () => {
+  const message = "Local model worker returned an unreadable response"
+  rejectPending(message)
+  status.textContent = message
 })
 
 const snapshotFor = async (tabId) => {
