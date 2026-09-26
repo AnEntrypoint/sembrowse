@@ -1,7 +1,10 @@
-name: Release portable plugins
+name: Publish Sembrowse release
 
 on:
   push:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,11 +21,17 @@ jobs:
       - run: node --check extension/popup.js
       - run: node --check extension/runner.js
       - run: node --check extension/inference_worker.js
-      - run: python scripts/build_extensions.py "0.1.0"
+      - id: version
+        run: |
+          VERSION="$(python3 -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+      - run: python scripts/build_extensions.py "${{ steps.version.outputs.value }}"
       - run: sha256sum dist/* > dist/SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
-          TAG: snapshot-${{ github.sha }}
+          TAG: v${{ steps.version.outputs.value }}
         run: |
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "Sembrowse $TAG" --prerelease --generate-notes
-          gh release upload "$TAG" dist/* --clobber
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "Sembrowse $TAG" --generate-notes --latest
