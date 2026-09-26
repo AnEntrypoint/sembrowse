@@ -158,6 +158,7 @@ async function run(task) {
     modelId: task.modelId,
     modelArtifact: modelArtifacts[task.modelId] || null,
     runtimeVersion,
+    extensionVersion: chrome.runtime.getManifest().version,
     tabId: task.tabId,
     windowId: task.windowId,
     startedAt: new Date().toISOString(),
@@ -165,14 +166,6 @@ async function run(task) {
   }
   download.disabled = true
   goalOutput.textContent = task.goal
-  setStatus("Loading local model…")
-  const loadedModel = await request("load", { modelId: task.modelId }, 600000)
-  evidence.runtimeMode = loadedModel.runtimeMode
-  let modelCalls = 0
-  let unchanged = 0
-  let previousState = ""
-  let priorActionWasNonWait = false
-  const history = []
   const navigationGoal = /\b(browse|go|navigate|open|visit)\b/i.test(task.goal)
   const authorGoal = /\bauthor+\b/i.test(task.goal)
   let initialPageUrl = ""
@@ -187,6 +180,47 @@ async function run(task) {
       return false
     }
   }
+  const initialTab = await chrome.tabs.get(task.tabId).catch(() => null)
+  if (authorGoal && initialTab) {
+    const githubPagesAuthor = (() => {
+      try {
+        return new URL(initialTab.url).hostname.match(/^([a-z0-9-]+)\.github\.io$/i)?.[1]?.toLowerCase() || ""
+      } catch {
+        return ""
+      }
+    })()
+    if (githubPagesAuthor) {
+      initialPageUrl = initialTab.url
+      authorHandle = githubPagesAuthor
+      evidence.observedUrl = initialPageUrl
+      evidence.executionMode = "deterministic-local-route"
+      appendTrace(`1. github-pages-author: ${authorHandle}`)
+      setStatus("Opening the author’s GitHub profile…")
+      await chrome.tabs.update(task.tabId, { url: `https://github.com/${authorHandle}` })
+      if (!await waitForTabComplete(task.tabId)) {
+        setStatus("Author profile did not finish loading")
+        return
+      }
+      const destination = await chrome.tabs.get(task.tabId).catch(() => null)
+      if (destination && canCompleteAt(destination.url)) {
+        evidence.completedUrl = destination.url
+        evidence.completionVerified = true
+        evidence.completionCheck = "github-author-profile"
+        appendTrace("2. author-profile-url")
+        appendTrace("2. DONE (100%)")
+        setStatus("Task completed locally")
+        return
+      }
+    }
+  }
+  setStatus("Loading local model…")
+  const loadedModel = await request("load", { modelId: task.modelId }, 600000)
+  evidence.runtimeMode = loadedModel.runtimeMode
+  let modelCalls = 0
+  let unchanged = 0
+  let previousState = ""
+  let priorActionWasNonWait = false
+  const history = []
   for (let step = 1; step <= 60 && !cancelled && activeRun === task.id; step += 1) {
     let snapshot
     try {
@@ -225,6 +259,7 @@ async function run(task) {
       return
     }
     initialPageUrl ||= snapshot.state.url
+    evidence.observedUrl = snapshot.state.url
     const stateKey = JSON.stringify({ url: snapshot.state.url, title: snapshot.state.title, text: snapshot.state.text, scroll: snapshot.state.scroll, candidates: snapshot.candidates.map(({ id, description, mode, options }) => ({ id, description, mode, options })) })
     unchanged = priorActionWasNonWait && stateKey === previousState ? unchanged + 1 : 0
     previousState = stateKey
@@ -255,9 +290,11 @@ async function run(task) {
         githubPagesAuthor = new URL(snapshot.state.url).hostname.match(/^([a-z0-9-]+)\.github\.io$/i)?.[1]?.toLowerCase() || ""
       } catch {}
     }
-    if (githubPagesAuthor) {
-      authorHandle = githubPagesAuthor
-      appendTrace(`${step}. github-pages-author: ${authorHandle}`)
+    const githubLinkedAuthor = authorGoal && !authorHandle && Array.isArray(snapshot.state.githubAccounts) && snapshot.state.githubAccounts.length === 1 ? snapshot.state.githubAccounts[0] : ""
+    const resolvedAuthor = githubPagesAuthor || githubLinkedAuthor
+    if (resolvedAuthor) {
+      authorHandle = resolvedAuthor
+      appendTrace(`${step}. ${githubPagesAuthor ? "github-pages-author" : "github-linked-author"}: ${authorHandle}`)
       setStatus("Opening the author’s GitHub profile…")
       await chrome.tabs.update(task.tabId, { url: `https://github.com/${authorHandle}` })
       if (!await waitForTabComplete(task.tabId)) {

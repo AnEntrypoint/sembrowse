@@ -59,6 +59,18 @@ if (!globalThis.__sembrowseLocalAttached) {
 
   const sample = (elements) => elements.length <= 16 ? elements : [...elements.slice(0, 12), ...elements.filter((element) => element.matches("a[href]")).slice(-4).filter((element) => !elements.slice(0, 12).includes(element))]
 
+  const githubAccounts = () => {
+    const accounts = new Set()
+    for (const link of document.links) {
+      try {
+        const destination = new URL(link.href, location.href)
+        const parts = destination.hostname.toLowerCase() === "github.com" ? destination.pathname.split("/").filter(Boolean) : []
+        if (parts.length) accounts.add(parts[0].toLowerCase())
+      } catch {}
+    }
+    return [...accounts].slice(0, 8)
+  }
+
   const choices = (goal) => sample(Array.from(document.querySelectorAll("button, a[href], input, textarea, select, [role=button], [role=combobox], [contenteditable=true]"))
     .filter((element) => !element.matches("input[type=hidden], input[type=file], input[type=password]"))
     .filter(selectable)
@@ -78,7 +90,7 @@ if (!globalThis.__sembrowseLocalAttached) {
       snapshot = { candidates, fingerprint: crypto.randomUUID() }
       sendResponse({
         candidates: candidates.map(({ id, mode, description, options }) => ({ id, mode, description, options })),
-        state: { url: location.href, title: document.title, text: document.body.innerText.slice(0, 512), scroll: { top: scrollY, height: document.documentElement.scrollHeight, viewport: innerHeight } },
+        state: { url: location.href, title: document.title, text: document.body.innerText.slice(0, 512), githubAccounts: githubAccounts(), scroll: { top: scrollY, height: document.documentElement.scrollHeight, viewport: innerHeight } },
         fingerprint: snapshot.fingerprint
       })
       return
