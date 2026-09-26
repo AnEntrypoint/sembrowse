@@ -3,9 +3,10 @@ const model = document.querySelector("#model")
 const decide = document.querySelector("#decide")
 const status = document.querySelector("#status")
 
-chrome.storage.local.get({ goal: "", model: model.value }, (saved) => {
+chrome.storage.local.get({ goal: "", model: model.value, lastTaskStatus: null }, (saved) => {
   goal.value = saved.goal
   model.value = saved.model
+  if (saved.lastTaskStatus) status.textContent = saved.lastTaskStatus.message
 })
 
 decide.addEventListener("click", async () => {

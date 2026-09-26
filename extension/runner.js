@@ -4,6 +4,12 @@ const status = document.querySelector("#status")
 const trace = document.querySelector("#trace")
 const worker = new Worker("inference_worker.js", { type: "module" })
 const pending = new Map()
+const setStatus = (message) => {
+  status.textContent = message
+  if (activeRun) {
+    void chrome.storage.local.set({ lastTaskStatus: { message, updatedAt: Date.now() } })
+  }
+}
 let resolveWorkerReady
 let rejectWorkerReady
 const workerReady = new Promise((resolve, reject) => {
@@ -59,7 +65,7 @@ worker.addEventListener("message", ({ data }) => {
     return
   }
   if (data.type === "progress") {
-    status.textContent = data.message
+    setStatus(data.message)
     return
   }
   const callback = pending.get(data.id)
@@ -74,7 +80,7 @@ worker.addEventListener("error", (event) => {
   workerFailure = message
   rejectWorkerReady(new Error(message))
   rejectPending(message)
-  status.textContent = message
+  setStatus(message)
 })
 
 worker.addEventListener("messageerror", () => {
@@ -83,7 +89,7 @@ worker.addEventListener("messageerror", () => {
   workerFailure = message
   rejectWorkerReady(new Error(message))
   rejectPending(message)
-  status.textContent = message
+  setStatus(message)
 })
 
 const snapshotFor = async (tabId) => {
@@ -118,13 +124,13 @@ const settle = async (operation) => {
 
 stop.addEventListener("click", () => {
   cancelled = true
-  status.textContent = "Stopping after the current local model call…"
+  setStatus("Stopping after the current local model call…")
 })
 
 async function run(task) {
   activeRun = task.id
   goalOutput.textContent = task.goal
-  status.textContent = "Loading local WebGPU model…"
+  setStatus("Loading local WebGPU model…")
   await request("load", { modelId: task.modelId }, 600000)
   let modelCalls = 0
   let unchanged = 0
@@ -137,40 +143,40 @@ async function run(task) {
       snapshot = await snapshotFor(task.tabId)
     } catch (error) {
       if (!await hasPageAccess()) {
-        status.textContent = "Page access was revoked; restart from the Sembrowse popup"
+        setStatus("Page access was revoked; restart from the Sembrowse popup")
         return
       }
       const tab = await chrome.tabs.get(task.tabId).catch(() => null)
       if (!tab) {
-        status.textContent = "Task tab was closed; task stopped"
+        setStatus("Task tab was closed; task stopped")
         return
       }
       if (tab.status === "complete" && !isInjectablePage(tab)) {
-        status.textContent = "Page does not allow extension access; task stopped"
+        setStatus("Page does not allow extension access; task stopped")
         return
       }
-      status.textContent = "Waiting for page navigation…"
+      setStatus("Waiting for page navigation…")
       const loaded = await waitForTabComplete(task.tabId)
       if (!loaded) {
-        status.textContent = "Page did not finish loading; task stopped"
+        setStatus("Page did not finish loading; task stopped")
         return
       }
       appendTrace(`${step}. page changed; re-observing`)
       continue
     }
     if (snapshot.error) {
-      status.textContent = snapshot.error
+      setStatus(snapshot.error)
       return
     }
     const stateKey = JSON.stringify({ url: snapshot.state.url, title: snapshot.state.title, text: snapshot.state.text, scroll: snapshot.state.scroll, candidates: snapshot.candidates.map(({ id, description, mode, options }) => ({ id, description, mode, options })) })
     unchanged = priorActionWasNonWait && stateKey === previousState ? unchanged + 1 : 0
     previousState = stateKey
     if (unchanged >= 3) {
-      status.textContent = "Task blocked after three unchanged non-wait actions"
+      setStatus("Task blocked after three unchanged non-wait actions")
       return
     }
     if (modelCalls >= 120) {
-      status.textContent = "Task stopped at the 120 local model-call limit"
+      setStatus("Task stopped at the 120 local model-call limit")
       return
     }
     const result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls })
@@ -178,7 +184,7 @@ async function run(task) {
     modelCalls += result.calls || 0
     if (result.operation === "DONE" || result.operation === "BLOCKED") {
       appendTrace(`${step}. ${result.operation} (${(result.probability * 100).toFixed(0)}%)`)
-      status.textContent = result.operation === "DONE" ? "Task completed locally" : "Task blocked; review the visible page state"
+      setStatus(result.operation === "DONE" ? "Task completed locally" : "Task blocked; review the visible page state")
       return
     }
     let executed
@@ -196,7 +202,7 @@ async function run(task) {
         priorActionWasNonWait = false
         continue
       }
-      status.textContent = executed.error
+      setStatus(executed.error)
       return
     }
     history.push(`${result.operation}: ${executed.description}`)
@@ -205,7 +211,7 @@ async function run(task) {
     priorActionWasNonWait = result.operation !== "WAIT"
     await settle(result.operation)
   }
-  status.textContent = cancelled ? "Task stopped" : "Task stopped after 60 actions"
+  setStatus(cancelled ? "Task stopped" : "Task stopped after 60 actions")
 }
 
 chrome.storage.local.get({ task: null }).then(({ task }) => {
@@ -214,5 +220,5 @@ chrome.storage.local.get({ task: null }).then(({ task }) => {
     stop.disabled = true
     return
   }
-  run(task).catch((error) => { status.textContent = error.message }).finally(async () => { await chrome.storage.local.remove("task"); stop.disabled = true })
+  run(task).catch((error) => { setStatus(error.message) }).finally(async () => { await chrome.storage.local.remove("task"); stop.disabled = true })
 })
