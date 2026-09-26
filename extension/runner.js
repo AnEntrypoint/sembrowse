@@ -171,7 +171,18 @@ async function run(task) {
   let priorActionWasNonWait = false
   const history = []
   const navigationGoal = /\b(browse|go|navigate|open|visit)\b/i.test(task.goal)
+  const authorGoal = /\bauthor+\b/i.test(task.goal)
   let initialPageUrl = ""
+  const canCompleteAt = (url) => {
+    if (!navigationGoal || url === initialPageUrl) return !navigationGoal
+    if (!authorGoal) return true
+    try {
+      const destination = new URL(url)
+      return destination.hostname === "github.com" && destination.pathname.split("/").filter(Boolean).length === 1
+    } catch {
+      return false
+    }
+  }
   for (let step = 1; step <= 60 && !cancelled && activeRun === task.id; step += 1) {
     let snapshot
     try {
@@ -215,17 +226,22 @@ async function run(task) {
       setStatus("Task stopped at the 120 local model-call limit")
       return
     }
-    const result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: !navigationGoal || snapshot.state.url !== initialPageUrl })
+    const result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: canCompleteAt(snapshot.state.url) })
     if (cancelled || activeRun !== task.id) return
     modelCalls += result.calls || 0
-    if (result.operation === "DONE" && navigationGoal && snapshot.state.url === initialPageUrl) {
-      appendTrace(`${step}. rejected DONE: navigation goal still has the starting URL`)
-      history.push("DONE rejected: the requested navigation has not changed the URL")
+    if (result.operation === "DONE" && !canCompleteAt(snapshot.state.url)) {
+      appendTrace(`${step}. rejected DONE: destination has not met the task completion check`)
+      history.push("DONE rejected: the destination does not yet meet the task completion check")
       if (history.length > 6) history.shift()
       priorActionWasNonWait = false
       continue
     }
     if (result.operation === "DONE" || result.operation === "BLOCKED") {
+      if (result.operation === "DONE") {
+        evidence.completedUrl = snapshot.state.url
+        evidence.completionVerified = true
+        evidence.completionCheck = authorGoal ? "github-author-profile" : navigationGoal ? "navigation-url-change" : "model-completion"
+      }
       appendTrace(`${step}. ${result.operation} (${(result.probability * 100).toFixed(0)}%)`)
       setStatus(result.operation === "DONE" ? "Task completed locally" : "Task blocked; review the visible page state")
       return
