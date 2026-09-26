@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: sembrowse-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -26,7 +30,7 @@ jobs:
           VERSION="$(python3 -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')"
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
       - run: python scripts/build_extensions.py "${{ steps.version.outputs.value }}"
-      - run: sha256sum dist/* > dist/SHA256SUMS
+      - run: cd dist && sha256sum *.zip > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: v${{ steps.version.outputs.value }}
