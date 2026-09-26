@@ -27,7 +27,7 @@ decide.addEventListener("click", async () => {
     return
   }
   status.textContent = "Opening the local model task…"
-    const task = { id: crypto.randomUUID(), goal: taskGoal, modelId: model.value, tabId: tab.id }
+    const task = { id: crypto.randomUUID(), goal: taskGoal, modelId: model.value, tabId: tab.id, windowId: tab.windowId }
     await chrome.storage.local.set({ goal: taskGoal, model: model.value, task })
     await chrome.windows.create({ url: chrome.runtime.getURL("runner.html"), type: "popup", width: 380, height: 620, focused: true })
     status.textContent = "Continuous local task started"

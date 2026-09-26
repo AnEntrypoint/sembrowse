@@ -1,11 +1,14 @@
 const goalOutput = document.querySelector("#goal")
 const stop = document.querySelector("#stop")
+const download = document.querySelector("#download")
 const status = document.querySelector("#status")
 const trace = document.querySelector("#trace")
 const worker = new Worker("inference_worker.js", { type: "module" })
 const pending = new Map()
+let evidence = null
 const setStatus = (message) => {
   status.textContent = message
+  if (evidence) evidence.events.push({ type: "status", message, at: new Date().toISOString() })
   if (activeRun) {
     void chrome.storage.local.set({ lastTaskStatus: { message, updatedAt: Date.now() } })
   }
@@ -33,8 +36,23 @@ const appendTrace = (message) => {
   const item = document.createElement("li")
   item.textContent = message
   trace.append(item)
+  if (evidence) evidence.events.push({ type: "trace", message, at: new Date().toISOString() })
   trace.scrollTop = trace.scrollHeight
 }
+const downloadEvidence = async () => {
+  if (!evidence) return
+  const payload = { ...evidence, exportedAt: new Date().toISOString() }
+  if (evidence.windowId !== undefined) {
+    payload.screenshot = await chrome.tabs.captureVisibleTab(evidence.windowId, { format: "png" }).catch(() => null)
+  }
+  const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }))
+  const anchor = document.createElement("a")
+  anchor.href = url
+  anchor.download = `sembrowse-task-${evidence.id}.json`
+  anchor.click()
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+download.addEventListener("click", () => { void downloadEvidence() })
 const request = async (type, payload = {}, timeout = 90000) => {
   if (workerFailure) return Promise.reject(new Error(workerFailure))
   await workerReady
@@ -129,6 +147,17 @@ stop.addEventListener("click", () => {
 
 async function run(task) {
   activeRun = task.id
+  evidence = {
+    schemaVersion: 1,
+    id: task.id,
+    goal: task.goal,
+    modelId: task.modelId,
+    tabId: task.tabId,
+    windowId: task.windowId,
+    startedAt: new Date().toISOString(),
+    events: []
+  }
+  download.disabled = false
   goalOutput.textContent = task.goal
   setStatus("Loading local WebGPU model…")
   await request("load", { modelId: task.modelId }, 600000)
@@ -220,5 +249,15 @@ chrome.storage.local.get({ task: null }).then(({ task }) => {
     stop.disabled = true
     return
   }
-  run(task).catch((error) => { setStatus(error.message) }).finally(async () => { await chrome.storage.local.remove("task"); stop.disabled = true })
+  run(task).catch((error) => {
+    setStatus(error.message)
+    if (evidence) evidence.error = error.message
+  }).finally(async () => {
+    if (evidence && !evidence.finishedAt) {
+      evidence.finishedAt = new Date().toISOString()
+      evidence.terminalStatus = status.textContent
+    }
+    await chrome.storage.local.remove("task")
+    stop.disabled = true
+  })
 })
