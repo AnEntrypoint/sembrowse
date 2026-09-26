@@ -20,17 +20,32 @@ async function load(id, modelId) {
   if (engine) return send(id, { type: "ready" })
   selected = models[modelId]
   if (!selected) return send(id, { error: "Choose a supported browser model" })
-  engine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
+  const loadedEngine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
+  loadedEngine.setCompat({
+    worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,
+    wasm: new URL("./vendor/wllama/compat/wllama.wasm", self.location.href).href
+  }, "always")
   self.postMessage({ type: "progress", message: "Downloading or opening the browser-cached model…" })
-  await engine.loadModelFromUrl(selected.url, {
-    n_ctx: 2048,
-    n_batch: 512,
-    n_gpu_layers: 999,
-    useCache: true,
-    cache_prompt: false,
-    progressCallback: ({ loaded, total }) => self.postMessage({ type: "progress", message: total ? `Loading model ${(loaded / total * 100).toFixed(0)}%` : "Loading model" })
-  })
-  await engine.createChatCompletion({ messages: [{ role: "user", content: "Reply ready." }], max_tokens: 1, temperature: 0, cache_prompt: false, chat_template_kwargs: { enable_thinking: false } })
+  let loaded = false
+  try {
+    await loadedEngine.loadModelFromUrl(selected.url, {
+      n_ctx: 2048,
+      n_batch: 512,
+      n_gpu_layers: 999,
+      useCache: true,
+      cache_prompt: false,
+      progressCallback: ({ loaded, total }) => self.postMessage({ type: "progress", message: total ? `Downloading model: ${Math.round(loaded / total * 100)}%` : `Downloading model: ${loaded} bytes` })
+    })
+    await loadedEngine.createChatCompletion({
+      messages: [{ role: "system", content: "Reply with READY." }, { role: "user", content: "READY" }],
+      n_predict: 1,
+      temperature: 0
+    })
+    loaded = true
+  } finally {
+    if (!loaded) await loadedEngine.exit().catch(() => undefined)
+  }
+  engine = loadedEngine
   send(id, { type: "ready" })
 }
 
