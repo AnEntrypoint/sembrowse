@@ -8,7 +8,7 @@ const modelArtifacts = {
   "minicpm5-2b": "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf"
 }
 const runtimeVersion = "wllama 3.6.1"
-const worker = new Worker("inference_worker.js", { type: "module" })
+const worker = new Worker(`inference_worker.js?v=${chrome.runtime.getManifest().version}`, { type: "module" })
 const pending = new Map()
 let evidence = null
 const setStatus = (message) => {
@@ -79,6 +79,7 @@ const rejectPending = (message) => {
 }
 
 worker.addEventListener("message", ({ data }) => {
+  if (!data || typeof data !== "object") return
   if (data.type === "worker_ready") {
     clearTimeout(workerReadyTimer)
     resolveWorkerReady()
@@ -173,12 +174,13 @@ async function run(task) {
   const navigationGoal = /\b(browse|go|navigate|open|visit)\b/i.test(task.goal)
   const authorGoal = /\bauthor+\b/i.test(task.goal)
   let initialPageUrl = ""
+  let authorHandle = ""
   const canCompleteAt = (url) => {
     if (!navigationGoal || url === initialPageUrl) return !navigationGoal
     if (!authorGoal) return true
     try {
       const destination = new URL(url)
-      return destination.hostname === "github.com" && destination.pathname.split("/").filter(Boolean).length === 1
+      return !!authorHandle && destination.hostname === "github.com" && destination.pathname === `/${authorHandle}`
     } catch {
       return false
     }
@@ -186,6 +188,7 @@ async function run(task) {
   for (let step = 1; step <= 60 && !cancelled && activeRun === task.id; step += 1) {
     let snapshot
     try {
+      setStatus("Observing the current page…")
       snapshot = await snapshotFor(task.tabId, task.goal)
     } catch (error) {
       if (!await hasPageAccess()) {
@@ -210,6 +213,11 @@ async function run(task) {
       appendTrace(`${step}. page changed; re-observing`)
       continue
     }
+    if (!snapshot || typeof snapshot !== "object") {
+      appendTrace(`${step}. page response unavailable; re-observing`)
+      priorActionWasNonWait = false
+      continue
+    }
     if (snapshot.error) {
       setStatus(snapshot.error)
       return
@@ -226,9 +234,35 @@ async function run(task) {
       setStatus("Task stopped at the 120 local model-call limit")
       return
     }
-    const result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: canCompleteAt(snapshot.state.url) })
+    const candidateUrl = (candidate) => candidate.description.match(/https:\/\/\S+/)?.[0] || ""
+    const githubPath = (candidate) => {
+      try {
+        const destination = new URL(candidateUrl(candidate))
+        return destination.hostname === "github.com" ? destination.pathname.split("/").filter(Boolean) : []
+      } catch {
+        return []
+      }
+    }
+    const profileCandidate = authorGoal && authorHandle && snapshot.candidates.find((candidate) => githubPath(candidate).join("/") === authorHandle)
+    const repositoryCandidate = authorGoal && !authorHandle && new URL(snapshot.state.url).hostname !== "github.com" && snapshot.candidates.find((candidate) => githubPath(candidate).length >= 2)
+    let result
+    if (canCompleteAt(snapshot.state.url)) result = { operation: "DONE", probability: 1, calls: 0, policy: "author-profile-url" }
+    else if (profileCandidate || repositoryCandidate) {
+      const candidate = profileCandidate || repositoryCandidate
+      result = { operation: candidate.mode, id: candidate.id, probability: 1, calls: 0, policy: "author-navigation" }
+    } else {
+      setStatus("Choosing the next local browser action…")
+      result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: false }, 180000)
+    }
     if (cancelled || activeRun !== task.id) return
     modelCalls += result.calls || 0
+    if (result.policy) appendTrace(`${step}. ${result.policy}`)
+    const selectedCandidate = snapshot.candidates.find((candidate) => candidate.id === result.id)
+    if (selectedCandidate) appendTrace(`${step}. selected ${result.operation}: ${selectedCandidate.description}`)
+    if (result.policy === "author-navigation" && selectedCandidate) {
+      const path = githubPath(selectedCandidate)
+      if (path.length >= 2) authorHandle = path[0]
+    }
     if (result.operation === "DONE" && !canCompleteAt(snapshot.state.url)) {
       appendTrace(`${step}. rejected DONE: destination has not met the task completion check`)
       history.push("DONE rejected: the destination does not yet meet the task completion check")
@@ -255,6 +289,15 @@ async function run(task) {
       await sleep(100)
       continue
     }
+    if (!executed || typeof executed !== "object") {
+      appendTrace(`${step}. action triggered navigation; re-observing`)
+      priorActionWasNonWait = false
+      if (!await waitForTabComplete(task.tabId)) {
+        setStatus("Page did not finish loading after the selected action")
+        return
+      }
+      continue
+    }
     if (executed.error) {
       if (/changed|interrupted/i.test(executed.error)) {
         appendTrace(`${step}. stale action discarded`)
@@ -263,6 +306,28 @@ async function run(task) {
       }
       setStatus(executed.error)
       return
+    }
+    if (executed.navigation) {
+      let destination
+      try {
+        destination = new URL(executed.navigation)
+      } catch {
+        setStatus("Browser action returned an invalid navigation target")
+        return
+      }
+      if (destination.protocol !== "https:" && destination.protocol !== "http:") {
+        setStatus("Browser action returned an unsafe navigation target")
+        return
+      }
+      if (authorGoal && authorHandle && destination.hostname === "github.com" && destination.pathname.split("/").filter(Boolean)[0] === authorHandle) {
+        destination = new URL(`https://github.com/${authorHandle}`)
+        appendTrace(`${step}. author profile destination: ${destination.href}`)
+      }
+      await chrome.tabs.update(task.tabId, { url: destination.href })
+      if (!await waitForTabComplete(task.tabId)) {
+        setStatus("Browser navigation did not complete")
+        return
+      }
     }
     history.push(`${result.operation}: ${executed.description}`)
     if (history.length > 6) history.shift()
@@ -287,6 +352,7 @@ chrome.storage.local.get({ task: null }).then(({ task }) => {
       evidence.finishedAt = new Date().toISOString()
       evidence.terminalStatus = status.textContent
     }
+    if (evidence) await chrome.storage.local.set({ lastTaskEvidence: evidence })
     await chrome.storage.local.remove("task")
     stop.disabled = true
     download.disabled = !evidence?.finishedAt

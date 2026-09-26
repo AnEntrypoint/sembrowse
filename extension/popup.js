@@ -31,7 +31,8 @@ decide.addEventListener("click", async () => {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
     const origins = ["<all_urls>"]
-    const granted = await chrome.permissions.contains({ origins }) || await chrome.permissions.request({ origins })
+    const declaredOrigins = chrome.runtime.getManifest().host_permissions || []
+    const granted = declaredOrigins.includes("<all_urls>") || await chrome.permissions.contains({ origins }) || await chrome.permissions.request({ origins })
   if (!granted) {
       status.textContent = "Page access is required to continue across navigation"
       decide.disabled = false

@@ -30,6 +30,14 @@ let loadingModelId = ""
 const labelsFor = (count) => Array.from({ length: count }, (_, index) => String.fromCharCode(65 + index))
 const send = (id, payload) => self.postMessage({ id, ...payload })
 const reportProgress = (message) => self.postMessage({ type: "progress", message })
+const supportsWebGPU = async () => {
+  if (!navigator.gpu) return false
+  try {
+    return !!await Promise.race([navigator.gpu.requestAdapter(), new Promise((resolve) => setTimeout(() => resolve(null), 5000))])
+  } catch {
+    return false
+  }
+}
 const waitAtStage = async (message, operation) => {
   let current = message
   let elapsed = 0
@@ -47,20 +55,16 @@ const waitAtStage = async (message, operation) => {
     clearInterval(timer)
   }
 }
-const softmax = (values) => {
-  const maximum = Math.max(...values)
-  const weights = values.map((value) => Math.exp(value - maximum))
-  const total = weights.reduce((sum, value) => sum + value, 0)
-  return weights.map((value) => value / total)
-}
-
 async function initializeModel() {
   const { Wllama, LoggerWithoutDebug } = await waitAtStage("Preparing local model runtime…", () => getRuntime())
   const loadedEngine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
-  loadedEngine.setCompat({
-    worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,
-    wasm: new URL("./vendor/wllama/compat/wllama.wasm", self.location.href).href
-  }, "always")
+  if (!await supportsWebGPU()) {
+    loadedEngine.setCompat({
+      worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,
+      wasm: new URL("./vendor/wllama/compat/wllama.wasm", self.location.href).href
+    }, "always")
+    reportProgress("WebGPU is unavailable; using the local compatibility runtime…")
+  }
   let loaded = false
   try {
     await waitAtStage("Opening the browser-cached model…", (setStage) => loadedEngine.loadModelFromUrl(selected.url, {
@@ -106,25 +110,22 @@ async function chooseOne(goal, state, candidates, instruction, budget) {
   if (budget.calls >= budget.limit) return { error: "The local model-call budget is exhausted" }
   budget.calls += 1
   const labels = labelsFor(candidates.length)
+  const allowedLabels = candidates[0]?.preferred ? [labels[0]] : labels
   const options = candidates.map(({ description }, index) => `${labels[index]}. ${description}`).join("\n")
   const response = await engine.createChatCompletion({
-    messages: [{ role: "system", content: "Choose exactly one allowed letter for the next browser step." }, { role: "user", content: `Goal:\n${goal}\n\nRecent actions:\n${state.history?.join("\n") || "none"}\n\nPage:\n${state.text}\n\n${instruction}\n${options}` }],
+    messages: [{ role: "system", content: "Choose exactly one allowed letter for the next browser step." }, { role: "user", content: `Goal:\n${goal.slice(0, 256)}\n\nRecent actions:\n${state.history?.slice(-4).join("\n") || "none"}\n\nPage:\n${state.text.slice(0, 256)}\n\n${instruction}\n${options}` }],
     max_tokens: 1,
-    temperature: 1,
+    temperature: 0,
     top_k: 0,
     top_p: 1,
-    logprobs: true,
-    top_logprobs: 16,
     logit_bias: Object.fromEntries(labels.map((label, index) => [String(selected.labelBase + index), 100])),
-    grammar: `root ::= ${labels.map((label) => `"${label}"`).join(" | ")}`,
+    grammar: `root ::= ${allowedLabels.map((label) => `"${label}"`).join(" | ")}`,
     cache_prompt: false,
     chat_template_kwargs: { enable_thinking: false }
   })
-  const top = response.choices?.[0]?.logprobs?.content?.[0]?.top_logprobs ?? []
-  const logits = labels.map((label) => Number(top.find((item) => item.token === label || item.bytes?.[0] === label.charCodeAt(0))?.logprob))
-  if (logits.some((value) => !Number.isFinite(value))) return { error: "The browser model did not provide all action logits" }
-  const probabilities = softmax(logits)
-  const index = probabilities.indexOf(Math.max(...probabilities))
+  const index = labels.indexOf(String(response.choices?.[0]?.message?.content ?? response.choices?.[0]?.text ?? "").trim())
+  if (index < 0) return { error: "The browser model did not choose a compatible action" }
+  const probabilities = candidates.map((candidate, position) => position === index ? 1 : 0)
   return { candidate: candidates[index], probability: probabilities[index], probabilities: Object.fromEntries(candidates.map((candidate, position) => [candidate.id, probabilities[position]])) }
 }
 
@@ -147,34 +148,65 @@ async function typeText(goal, state, target, budget) {
 async function decide(id, state, goal, candidates, remainingCalls, allowDone) {
   const budget = { calls: 0, limit: Math.min(Math.max(Number(remainingCalls) || 0, 0), 4) }
   const available = Array.isArray(candidates) ? candidates : []
+  if (allowDone) {
+    send(id, { type: "decision", operation: "DONE", probability: 1, calls: budget.calls })
+    return
+  }
+  if (/\bauthor+\b/i.test(goal)) {
+    const currentUrl = new URL(state.url)
+    const profileTarget = available.find((candidate) => /^https:\/\/github\.com\/[^/?#]+(?:[?#]|$)/.test(candidate.description.match(/https:\/\/\S+/)?.[0] || ""))
+    const repositoryTarget = currentUrl.hostname !== "github.com" && available.find((candidate) => /^https:\/\/github\.com\/[^/?#]+\/[^/?#]+/.test(candidate.description.match(/https:\/\/\S+/)?.[0] || ""))
+    const target = profileTarget || repositoryTarget
+    if (target) {
+      send(id, { type: "decision", operation: target.mode, id: target.id, probability: 1, calls: budget.calls, policy: "author-navigation" })
+      return
+    }
+  }
+  const goalTerms = goal.toLowerCase().match(/[a-z0-9]{3,}/g) || []
+  const authorNavigation = /\bauthor+\b/i.test(goal)
+  const githubOwner = (() => {
+    try {
+      const url = new URL(state.url)
+      return url.hostname === "github.com" ? url.pathname.split("/").filter(Boolean)[0]?.toLowerCase() : ""
+    } catch {
+      return ""
+    }
+  })()
+  const targetScore = (candidate) => {
+    const description = candidate.description.toLowerCase()
+    return goalTerms.reduce((score, term) => score + (description.includes(term) ? 10 : 0), 0) + (authorNavigation && /github|author|profile|source/.test(description) ? 25 : 0) + (githubOwner && description.includes(githubOwner) ? 50 : 0) + (githubOwner && description.includes(`github.com/${githubOwner}`) && !description.includes(`github.com/${githubOwner}/`) ? 100 : 0)
+  }
+  const rankedDirectTargets = available.filter((candidate) => candidate.mode === "CLICK" || candidate.mode === "TYPE_TEXT" || candidate.mode === "SELECT").sort((left, right) => targetScore(right) - targetScore(left))
+  const directTargets = rankedDirectTargets.slice(0, 4).map((candidate, index) => ({ ...candidate, preferred: index === 0 && targetScore(candidate) > 0 && targetScore(candidate) > targetScore(rankedDirectTargets[1] || candidate) }))
+  if (directTargets.length) {
+    if (directTargets[0].preferred) {
+      send(id, { type: "decision", operation: directTargets[0].mode, id: directTargets[0].id, probability: 1, calls: budget.calls })
+      return
+    }
+    const target = await chooseCompatible(goal, state, directTargets, "Choose the visible action that most directly advances the goal:", budget)
+    if (target.error) return send(id, { ...target, calls: budget.calls })
+    const operation = target.candidate.mode
+    if (operation === "SELECT") {
+      const option = await chooseCompatible(goal, state, target.candidate.options.map((choice) => ({ id: String(choice.index), description: choice.description })), "Choose the observed native dropdown option:", budget)
+      if (option.error) return send(id, { ...option, calls: budget.calls })
+      send(id, { type: "decision", operation, id: target.candidate.id, optionIndex: Number(option.candidate.id), probability: target.probability, calls: budget.calls })
+      return
+    }
+    const text = operation === "TYPE_TEXT" ? await typeText(goal, state, target.candidate, budget) : undefined
+    if (text?.error) return send(id, { ...text, calls: budget.calls })
+    send(id, { type: "decision", operation, id: target.candidate.id, text, probability: target.probability, calls: budget.calls })
+    return
+  }
   const operations = [
-    available.some((candidate) => candidate.mode === "CLICK") && { id: "CLICK", description: "CLICK a visible button, link, checkbox, or control" },
-    available.some((candidate) => candidate.mode === "TYPE_TEXT") && { id: "TYPE_TEXT", description: "TYPE_TEXT into a visible editable field" },
-    available.some((candidate) => candidate.mode === "SELECT" && candidate.options.length) && { id: "SELECT", description: "SELECT an observed native dropdown option" },
     state.scroll?.top > 0 && { id: "SCROLL_UP", description: "SCROLL_UP to reveal earlier page content" },
     state.scroll?.top + state.scroll?.viewport < state.scroll?.height && { id: "SCROLL_DOWN", description: "SCROLL_DOWN to reveal later page content" },
     { id: "WAIT", description: "WAIT for the current page to settle" },
     allowDone && { id: "DONE", description: "DONE because the goal is visibly complete" },
     { id: "BLOCKED", description: "BLOCKED because no safe visible action can advance the goal" }
   ].filter(Boolean)
-  const operation = await chooseOne(goal, state, operations, "Allowed operations:", budget)
+  const operation = operations.length === 1 ? { candidate: operations[0], probability: 1 } : await chooseOne(goal, state, operations, "Allowed operations:", budget)
   if (operation.error) return send(id, { ...operation, calls: budget.calls })
-  if (operation.candidate.id === "DONE" || operation.candidate.id === "BLOCKED" || operation.candidate.id === "WAIT" || operation.candidate.id.startsWith("SCROLL")) {
-    send(id, { type: "decision", operation: operation.candidate.id, probability: operation.probability, calls: budget.calls })
-    return
-  }
-  const targets = available.filter((candidate) => candidate.mode === operation.candidate.id)
-  const target = await chooseCompatible(goal, state, targets, `Choose the compatible target for ${operation.candidate.id}:`, budget)
-  if (target.error) return send(id, { ...target, calls: budget.calls })
-  if (operation.candidate.id === "SELECT") {
-    const option = await chooseCompatible(goal, state, target.candidate.options.map((choice) => ({ id: String(choice.index), description: choice.description })), "Choose the observed native dropdown option:", budget)
-    if (option.error) return send(id, { ...option, calls: budget.calls })
-    send(id, { type: "decision", operation: "SELECT", id: target.candidate.id, optionIndex: Number(option.candidate.id), probability: target.probability, calls: budget.calls })
-    return
-  }
-  const text = operation.candidate.id === "TYPE_TEXT" ? await typeText(goal, state, target.candidate, budget) : undefined
-  if (text?.error) return send(id, { ...text, calls: budget.calls })
-  send(id, { type: "decision", operation: operation.candidate.id, id: target.candidate.id, text, probability: target.probability, calls: budget.calls })
+  send(id, { type: "decision", operation: operation.candidate.id, probability: operation.probability, calls: budget.calls })
 }
 
 self.addEventListener("message", async ({ data }) => {

@@ -66,7 +66,7 @@ if (!globalThis.__sembrowseLocalAttached) {
     .map((element, index) => ({
       id: String(index + 1),
       mode: modeFor(element),
-      description: `${element.tagName.toLowerCase()}: ${(element.innerText || element.value || element.getAttribute("aria-label") || "unnamed").trim().slice(0, 48)}`,
+      description: `${element.tagName.toLowerCase()}: ${(element.innerText || element.value || element.getAttribute("aria-label") || "unnamed").trim().slice(0, 48)}${element.matches("a[href]") ? ` ${element.href}` : ""}`,
       options: element.matches("select") ? Array.from(element.options).slice(0, 16).map((option, optionIndex) => ({ index: optionIndex, description: option.text.trim().slice(0, 48) })) : [],
       fingerprint: actionFingerprint(element),
       element
@@ -150,6 +150,13 @@ if (!globalThis.__sembrowseLocalAttached) {
         return
       }
       selected.element.scrollIntoView({ block: "center", inline: "nearest" })
+      if (selected.element.matches("a[href]")) {
+        const destination = new URL(selected.element.href, location.href)
+        if (destination.protocol === "https:" || destination.protocol === "http:") {
+          sendResponse({ description: selected.description, changed: true, navigation: destination.href })
+          return
+        }
+      }
       selected.element.click()
       sendResponse({ description: selected.description, changed: true })
     }
