@@ -38,7 +38,7 @@ async function load(id, modelId) {
     })
     await loadedEngine.createChatCompletion({
       messages: [{ role: "system", content: "Reply with READY." }, { role: "user", content: "READY" }],
-      n_predict: 1,
+      max_tokens: 1,
       temperature: 0
     })
     loaded = true
