@@ -182,19 +182,25 @@ async function run(task) {
   }
   const initialTab = await chrome.tabs.get(task.tabId).catch(() => null)
   if (authorGoal && initialTab) {
-    const githubPagesAuthor = (() => {
+    const initialUrl = initialTab.pendingUrl || initialTab.url
+    const directAuthor = (() => {
       try {
-        return new URL(initialTab.url).hostname.match(/^([a-z0-9-]+)\.github\.io$/i)?.[1]?.toLowerCase() || ""
+        const page = new URL(initialUrl)
+        const githubPagesAuthor = page.hostname.match(/^([a-z0-9-]+)\.github\.io$/i)?.[1]?.toLowerCase()
+        if (githubPagesAuthor) return { handle: githubPagesAuthor, source: "github-pages-author" }
+        const githubPath = page.hostname.toLowerCase() === "github.com" ? page.pathname.split("/").filter(Boolean) : []
+        if (githubPath.length >= 2) return { handle: githubPath[0].toLowerCase(), source: "github-repository-author" }
       } catch {
-        return ""
+        return null
       }
+      return null
     })()
-    if (githubPagesAuthor) {
-      initialPageUrl = initialTab.url
-      authorHandle = githubPagesAuthor
+    if (directAuthor) {
+      initialPageUrl = initialUrl
+      authorHandle = directAuthor.handle
       evidence.observedUrl = initialPageUrl
       evidence.executionMode = "deterministic-local-route"
-      appendTrace(`1. github-pages-author: ${authorHandle}`)
+      appendTrace(`1. ${directAuthor.source}: ${authorHandle}`)
       setStatus("Opening the author’s GitHub profile…")
       await chrome.tabs.update(task.tabId, { url: `https://github.com/${authorHandle}` })
       if (!await waitForTabComplete(task.tabId)) {
