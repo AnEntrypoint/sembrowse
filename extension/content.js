@@ -30,21 +30,19 @@ if (!globalThis.__sembrowseLocalAttached) {
   // usable control at all. Only the former should ever count as "just
   // needs scrolling".
   const belowFold = (rect) => rect.width > 0 && rect.height > 0 && rect.top >= innerHeight && rect.left > -rect.width && rect.left < innerWidth
-
-  // The mirror case -- content scrolled PAST (negative top, above the
-  // current viewport) after the page scrolled down. This is ordinary and
-  // scrollIntoView reveals it fine, unlike the skip-link pattern above,
-  // which also reports a negative top. The two are told apart by document
-  // position, not viewport position: a keyboard skip-link exists to be the
-  // very first Tab stop on the page, so by definition it sits at the very
-  // top of the DOM/layout (document-relative top near 0) regardless of how
-  // far the user has since scrolled. Content the user actually scrolled past
-  // instead sits wherever it naturally lives in the page, which is almost
-  // never right at the top once any real scrolling has happened. Requiring
-  // some scroll to have occurred before this even applies keeps a
-  // near-the-top skip-link excluded at scrollY=0 too, when it and a real
-  // top-of-page anchor would otherwise be indistinguishable.
-  const aboveFold = (rect) => rect.width > 0 && rect.height > 0 && rect.bottom <= 0 && rect.left > -rect.width && rect.left < innerWidth && scrollY > 150 && rect.top + scrollY > 150
+  // A mirrored aboveFold() (content scrolled PAST, negative top, meant to
+  // stay selectable the way belowFold does) was tried and reverted: the only
+  // cheap way to tell it apart from the skip-link pattern was a
+  // document-position guess (skip-links sit near DOM-top), and two
+  // independent adversarial reviews confirmed live that guess misfires both
+  // ways -- it wrongly excludes ordinary header/nav links (which also sit
+  // near DOM-top) and wrongly re-admits a skip-link on any page with a
+  // banner/promo strip pushing it past the threshold, reintroducing the
+  // exact invisible-control bug this exclusion exists to prevent. Excluding
+  // ALL negative-top elements is the safe default until there's a real
+  // (e.g. focus-behavior-based) test for this, not a positional guess: a
+  // false negative here costs some candidate recall, a false positive costs
+  // a wasted or broken action.
 
   // Distinct from being merely off-screen (which scrollIntoView fixes): an
   // on-screen element with something else on top of it at its own visual
@@ -108,16 +106,16 @@ if (!globalThis.__sembrowseLocalAttached) {
     if (!element.matches("a[href]")) return false
     if (!cssVisible(element)) return false
     const rect = element.getBoundingClientRect()
-    // A real <a href> that merely needs scrollIntoView (below the fold, or
-    // scrolled past above it) is a fine candidate. Two other things that
-    // make visible() reject it are not: on-screen but covered by something
+    // A real <a href> that merely needs scrollIntoView (below the fold) is
+    // a fine candidate. Two other things that make visible() reject it are
+    // not: on-screen but covered by something
     // else (a modal, an overlay -- scrolling never fixes that), and parked
     // off in negative-coordinate space by the keyboard skip-link pattern
     // (verified live: Amazon's "Search alt+/", "Cart shift+alt+C" -- these
     // move on screen only on :focus, so scrolling toward them reveals
     // nothing usable either).
     if (onScreen(rect) && occluded(element, rect)) return false
-    if (!onScreen(rect) && !belowFold(rect) && !aboveFold(rect)) return false
+    if (!onScreen(rect) && !belowFold(rect)) return false
     return true
   }
 
@@ -156,26 +154,35 @@ if (!globalThis.__sembrowseLocalAttached) {
     return out ? out.slice(0, 512) : document.body.innerText.slice(0, 512)
   }
 
-  // A single-line <input> that's genuinely a search box submits on Enter by
-  // convention -- that's what a real user does after typing a search query,
-  // and treating "type" and "submit" as two independent decisions is
-  // exactly the kind of two-step plan a small local model unreliably
-  // follows through on. Deliberately <input>-only (never textarea/
-  // contenteditable): a multi-line field's Enter conventionally means
-  // "newline", not "submit". Requires an actual search signal (type=search,
-  // or "search" in the field's own name/id/placeholder/aria-label/role, or
-  // the enclosing form marked role=search) rather than inferring it from
-  // "the only text field in the form" -- that fallback also matched a
-  // single-field login, coupon-code, or newsletter-signup form, silently
-  // submitting them the moment the model typed text into them, which is not
-  // a decision the model ever made.
+  // A single-line <input> that's either explicitly type=search, carries an
+  // explicit search signal, or is the only text-like field in a form with
+  // no password field, submits on Enter by convention -- that's what a real
+  // user does after typing a search query, and treating "type" and "submit"
+  // as two independent decisions is exactly the kind of two-step plan a
+  // small local model unreliably follows through on. Deliberately
+  // <input>-only (never textarea/contenteditable): a multi-line field's
+  // Enter conventionally means "newline", not "submit". A plain "only text
+  // field in the form" rule with no other check also matched a single-field
+  // login form, silently submitting a bare username with no password the
+  // moment the model typed text into it -- excluding any form with a
+  // password field closes that specific, high-severity case while keeping
+  // this working for real search boxes that don't happen to mention
+  // "search" anywhere in their own attributes (e.g. name="q" with no
+  // placeholder or aria-label), which a stricter search-signal-only rule
+  // would otherwise miss. A coupon or newsletter form (no password field,
+  // no search signal) can still false-positive here; that residual risk is
+  // a single wasted submit, not a credential leak.
   const isSearchLikeInput = (element) => {
     if (element.tagName !== "INPUT") return false
     if (element.type === "search") return true
     const ownSignal = [element.getAttribute("name"), element.getAttribute("id"), element.getAttribute("placeholder"), element.getAttribute("aria-label"), element.getAttribute("role")].join(" ").toLowerCase()
     if (/search/.test(ownSignal)) return true
     const form = element.form
-    return !!form && form.getAttribute("role") === "search"
+    if (!form) return false
+    if (form.getAttribute("role") === "search") return true
+    if (form.querySelector("input[type=password]")) return false
+    const textLike = "input:not([type]), input[type=text], input[type=search], input[type=email], input[type=tel], input[type=url], input[type=number]"
+    return Array.from(form.querySelectorAll(textLike)).filter((el) => !el.disabled).length === 1
   }
 
   const githubAccounts = () => {

@@ -467,8 +467,14 @@ async function run(task) {
     const selectedCandidate = snapshot.candidates.find((candidate) => candidate.id === result.id)
     const selectedKey = selectedCandidate ? deadEndKey(selectedCandidate) : ""
     if (selectedKey && selectedKey === lastDeadEndKey) {
+      // deadEndStreak counts REPEATS after the first pick, not total picks:
+      // it's 0 on pick 1, 1 on pick 2 (first repeat), 2 on pick 3 (second
+      // repeat). >=2 therefore blacklists on the 3rd consecutive identical
+      // pick, matching this exclusion's own stated intent -- a prior >=3
+      // here actually required a 4th repeat before blacklisting anything,
+      // one full extra dead click past what was documented.
       deadEndStreak += 1
-      if (deadEndStreak >= 3) deadEnds.add(selectedKey)
+      if (deadEndStreak >= 2) deadEnds.add(selectedKey)
     } else {
       deadEndStreak = 0
     }
