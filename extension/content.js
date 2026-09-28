@@ -155,23 +155,29 @@ if (!globalThis.__sembrowseLocalAttached) {
   }
 
   // A single-line <input> that's either explicitly type=search, carries an
-  // explicit search signal, or is the only text-like field in a form with
-  // no password field, submits on Enter by convention -- that's what a real
-  // user does after typing a search query, and treating "type" and "submit"
-  // as two independent decisions is exactly the kind of two-step plan a
-  // small local model unreliably follows through on. Deliberately
-  // <input>-only (never textarea/contenteditable): a multi-line field's
-  // Enter conventionally means "newline", not "submit". A plain "only text
-  // field in the form" rule with no other check also matched a single-field
-  // login form, silently submitting a bare username with no password the
-  // moment the model typed text into it -- excluding any form with a
-  // password field closes that specific, high-severity case while keeping
-  // this working for real search boxes that don't happen to mention
-  // "search" anywhere in their own attributes (e.g. name="q" with no
-  // placeholder or aria-label), which a stricter search-signal-only rule
-  // would otherwise miss. A coupon or newsletter form (no password field,
-  // no search signal) can still false-positive here; that residual risk is
-  // a single wasted submit, not a credential leak.
+  // explicit search signal, or is the only real text-like field in a form
+  // with no password-like field, submits on Enter by convention -- that's
+  // what a real user does after typing a search query, and treating "type"
+  // and "submit" as two independent decisions is exactly the kind of
+  // two-step plan a small local model unreliably follows through on.
+  // Deliberately <input>-only (never textarea/contenteditable): a
+  // multi-line field's Enter conventionally means "newline", not "submit".
+  // A plain "only text field in the form" rule with no other check also
+  // matched a single-field login form, silently submitting a bare username
+  // with no password the moment the model typed text into it -- excluding
+  // any form with a password-like field (isPasswordLike, below) closes that
+  // specific, high-severity case while keeping this working for real search
+  // boxes that don't happen to mention "search" anywhere in their own
+  // attributes (e.g. name="q" with no placeholder or aria-label), which a
+  // stricter search-signal-only rule would otherwise miss. A coupon or
+  // newsletter form (no password-like field, no search signal) can still
+  // false-positive here; that residual risk is a single wasted submit, not
+  // a credential leak.
+  // type=password is not the only way a field holds a credential -- a
+  // custom password-visibility toggle commonly swaps in type=text while
+  // keeping autocomplete=current-password/new-password, which a bare
+  // input[type=password] check misses entirely.
+  const isPasswordLike = (input) => input.type === "password" || /(?:^|\s)(?:current|new)-password(?:\s|$)/i.test(input.getAttribute("autocomplete") || "")
   const isSearchLikeInput = (element) => {
     if (element.tagName !== "INPUT") return false
     if (element.type === "search") return true
@@ -180,9 +186,15 @@ if (!globalThis.__sembrowseLocalAttached) {
     const form = element.form
     if (!form) return false
     if (form.getAttribute("role") === "search") return true
-    if (form.querySelector("input[type=password]")) return false
+    if (Array.from(form.querySelectorAll("input")).some(isPasswordLike)) return false
     const textLike = "input:not([type]), input[type=text], input[type=search], input[type=email], input[type=tel], input[type=url], input[type=number]"
-    return Array.from(form.querySelectorAll(textLike)).filter((el) => !el.disabled).length === 1
+    // Excluding only `disabled` here undercounts nothing, but a hidden
+    // honeypot/decoy field (display:none, still type=text) or a readonly
+    // prefilled field inflates the count above 1 and silently excludes a
+    // real lone search box from this fallback -- cssVisible() (defined
+    // above) plus a readOnly check keeps only fields a real user could
+    // actually type into.
+    return Array.from(form.querySelectorAll(textLike)).filter((el) => !el.disabled && !el.readOnly && cssVisible(el)).length === 1
   }
 
   const githubAccounts = () => {
