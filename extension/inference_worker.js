@@ -17,6 +17,9 @@ const DONE_CHECK_OPTIONS = [
   { id: "YES", description: "Yes: the goal is already completely achieved on this page" },
   { id: "NO", description: "No: something more still has to be done to achieve the goal" }
 ]
+const PLAN_SYSTEM = "Write a short numbered plan of browser actions that accomplish the user's goal: at most 4 steps, each under 12 words. Output only the plan."
+const PLAN_LINES = 4
+const PLAN_LINE_CHARS = 120
 const TYPE_TEXT_SYSTEM = [
   "You write the exact text a user types into a browser field to advance their goal.",
   "For a search box, write only the search keywords taken from the goal: leave out words like search, find, look up, and site names.",
@@ -188,9 +191,16 @@ const scrollSummary = (scroll) => {
 
 const frameNotice = (state) => state.coveringFrames > 0 ? "\nNote: a full-page embedded frame covers this page; its controls cannot be seen or used from here." : ""
 
+const planLines = (plan) => String(plan ?? "").split("\n").map((line) => clip(line, PLAN_LINE_CHARS)).filter(Boolean).slice(0, PLAN_LINES)
+
+const planBlock = (plan) => {
+  const lines = planLines(plan)
+  return lines.length ? `Plan:\n${lines.join("\n")}\n\n` : ""
+}
+
 const describeState = (goal, state) => [
   `Goal:\n${clip(goal, 256)}`,
-  `Page title: ${clip(state.title, 100)}\nPage URL: ${clip(state.url, 160)}\nView: ${scrollSummary(state.scroll)}${frameNotice(state)}`,
+  `${planBlock(state.plan)}Page title: ${clip(state.title, 100)}\nPage URL: ${clip(state.url, 160)}\nView: ${scrollSummary(state.scroll)}${frameNotice(state)}`,
   `Visible text:\n${clip(state.text, PROMPT_TEXT_CHARS)}`,
   `Recent actions:\n${(Array.isArray(state.history) ? state.history : []).slice(-PROMPT_HISTORY_LINES).map(promptLine).join("\n") || "none"}`
 ].join("\n\n")
@@ -338,6 +348,12 @@ const offeredCandidates = (candidates) => (Array.isArray(candidates) ? candidate
   .filter((candidate) => candidate && CANDIDATE_MODES.has(candidate.mode) && typeof candidate.description === "string" && candidate.id != null)
   .slice(0, MAX_CANDIDATE_OPTIONS)
 
+async function plan(reqId, goal) {
+  const budget = { calls: 0, limit: 1 }
+  const generated = await generateText(PLAN_SYSTEM, `Goal: ${clip(goal, 256)}\nPlan:`, 96, budget)
+  send(reqId, { type: "plan", text: generated.error ? "" : planLines(generated.text).join("\n"), calls: budget.calls })
+}
+
 async function decide(reqId, state, goal, candidates, remainingCalls) {
   const budget = { calls: 0, limit: Math.min(Math.max(Number(remainingCalls) || 0, 0), MAX_CALLS_PER_DECISION) }
   try {
@@ -354,6 +370,7 @@ async function decideWithin(budget, reqId, state, goal, candidates) {
   const known = [goal, state.url, ...offered.map((candidate) => candidate.description)].join(" ")
   let options = [...offered, ...operationOptions(state.scroll)]
   let lastError = ""
+  const notes = []
   while (options.length >= 2) {
     const chosen = await chooseOne(context, options, "Choose the next action that most directly advances the goal:", budget, image)
     if (chosen.error) return send(reqId, { error: lastError || chosen.error, calls: budget.calls })
@@ -361,13 +378,15 @@ async function decideWithin(budget, reqId, state, goal, candidates) {
       const verdict = await chooseOne(context, DONE_CHECK_OPTIONS, "", budget, image, `Is the goal "${clip(goal, 256)}" completely achieved on this page right now?`)
       if (verdict.error) return send(reqId, { error: lastError || verdict.error, calls: budget.calls })
       if (verdict.option.id !== "YES") {
+        notes.push("DONE was proposed but the completion check answered No")
         options = options.filter((option) => option !== chosen.option)
         continue
       }
     }
     const outcome = await realize(chosen.option, context, goal, known, budget, image)
-    if (!outcome.error) return send(reqId, { type: "decision", ...outcome.decision, calls: budget.calls })
+    if (!outcome.error) return send(reqId, { type: "decision", ...outcome.decision, notes, calls: budget.calls })
     lastError = outcome.error
+    notes.push(`${chosen.option.mode} discarded: ${outcome.error}`)
     options = options.filter((option) => option !== chosen.option)
   }
   send(reqId, { error: lastError || "No compatible action remained", calls: budget.calls })
@@ -376,6 +395,7 @@ async function decideWithin(budget, reqId, state, goal, candidates) {
 self.addEventListener("message", async ({ data }) => {
   try {
     if (data.type === "load") await load(data.reqId, data.modelId)
+    if (data.type === "plan") await plan(data.reqId, data.goal)
     if (data.type === "decide") await decide(data.reqId, data.state, data.goal, data.candidates, data.remainingCalls)
   } catch (error) {
     send(data.reqId, { error: error?.message ?? String(error) })

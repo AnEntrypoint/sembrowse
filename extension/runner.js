@@ -12,6 +12,10 @@ const DECIDE_TIMEOUT_MS = 400000
 const OBSERVE_TIMEOUT_MS = 15000
 const WORKER_READY_TIMEOUT_MS = 30000
 const MIN_CALLS_PER_DECISION = 3
+const SETTLE_TYPING_MS = 500
+const SETTLE_ACTION_MS = 250
+const SETTLE_WAIT_MS = 100
+const PLAN_TIMEOUT_MS = 90000
 const RETRY_DELAY_MS = 300
 const DECIDE_FAILURE_LIMIT = 3
 const CANDIDATE_OPERATIONS = new Set(["CLICK", "TYPE_TEXT", "SELECT"])
@@ -169,10 +173,10 @@ const waitForTabComplete = (tabId, timeout = 30000) => new Promise((resolve) => 
   }).catch(() => finish(false))
 })
 
-const settle = async (operation) => {
-  if (operation === "TYPE_TEXT") return sleep(200)
-  if (operation === "WAIT") return sleep(100)
-  await Promise.race([new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))), sleep(50)])
+const settle = async (tabId, operation) => {
+  await sleep(operation === "TYPE_TEXT" ? SETTLE_TYPING_MS : operation === "WAIT" ? SETTLE_WAIT_MS : SETTLE_ACTION_MS)
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  if (tab?.status === "loading") await waitForTabComplete(tabId)
 }
 
 const safeDestination = (raw) => {
@@ -274,6 +278,16 @@ async function run(task) {
   }
   let modelCalls = 0
   let decideFailures = 0
+  let plan = ""
+  try {
+    const planned = await request("plan", { goal: task.goal }, PLAN_TIMEOUT_MS)
+    modelCalls += planned.calls || 0
+    plan = planned.text
+    if (plan) appendTrace(`plan: ${plan.split("\n").join(" ")}`)
+  } catch (error) {
+    if (workerFailure) throw error
+    appendTrace(`planning failed: ${error.message}`)
+  }
 
   for (let step = 1; step <= MAX_STEPS && !halted(); step += 1) {
     const observation = await observe(task, loadedModel.visionCapable)
@@ -293,6 +307,7 @@ async function run(task) {
     if (MAX_MODEL_CALLS - modelCalls < MIN_CALLS_PER_DECISION) return setStatus(`Task stopped at the ${MAX_MODEL_CALLS} local model-call limit`)
 
     const candidates = guard.liveCandidates(snapshot.state.url, snapshot.candidates)
+    evidence.events.push({ type: "offered", step, candidates: candidates.map((candidate) => withoutQueries(candidate.description).slice(0, 90)), at: new Date().toISOString() })
     setStatus("Choosing the next local browser action…")
     let decisionElapsed = 0
     const decisionTimer = setInterval(() => {
@@ -301,7 +316,7 @@ async function run(task) {
     }, 5000)
     let result
     try {
-      result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates, remainingCalls: MAX_MODEL_CALLS - modelCalls }, DECIDE_TIMEOUT_MS)
+      result = await request("decide", { state: { ...snapshot.state, history, plan }, goal: task.goal, candidates, remainingCalls: MAX_MODEL_CALLS - modelCalls }, DECIDE_TIMEOUT_MS)
       if (!result?.operation) throw Object.assign(new Error("The local model returned no operation"), { calls: result?.calls || 0 })
       if (CANDIDATE_OPERATIONS.has(result.operation) && !candidates.some((candidate) => candidate.id === result.id)) throw Object.assign(new Error("The local model chose an option that was not offered"), { calls: result.calls || 0 })
     } catch (error) {
@@ -319,6 +334,7 @@ async function run(task) {
     if (halted()) break
     modelCalls += result.calls || 0
 
+    for (const note of result.notes || []) appendTrace(`${step}. ${note}`)
     const selected = candidates.find((candidate) => candidate.id === result.id)
     if (selected) appendTrace(`${step}. selected ${result.operation}: ${selected.description}`)
     const scrollTop = snapshot.state.scroll?.top ?? 0
@@ -388,7 +404,7 @@ async function run(task) {
     }
 
     if (applyVerdict(step, action)) return
-    await settle(result.operation)
+    await settle(task.tabId, result.operation)
   }
   setStatus(halted() ? "Task stopped" : `Task stopped after ${MAX_STEPS} actions`)
 }
