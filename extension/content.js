@@ -31,6 +31,21 @@ if (!globalThis.__sembrowseLocalAttached) {
   // needs scrolling".
   const belowFold = (rect) => rect.width > 0 && rect.height > 0 && rect.top >= innerHeight && rect.left > -rect.width && rect.left < innerWidth
 
+  // The mirror case -- content scrolled PAST (negative top, above the
+  // current viewport) after the page scrolled down. This is ordinary and
+  // scrollIntoView reveals it fine, unlike the skip-link pattern above,
+  // which also reports a negative top. The two are told apart by document
+  // position, not viewport position: a keyboard skip-link exists to be the
+  // very first Tab stop on the page, so by definition it sits at the very
+  // top of the DOM/layout (document-relative top near 0) regardless of how
+  // far the user has since scrolled. Content the user actually scrolled past
+  // instead sits wherever it naturally lives in the page, which is almost
+  // never right at the top once any real scrolling has happened. Requiring
+  // some scroll to have occurred before this even applies keeps a
+  // near-the-top skip-link excluded at scrollY=0 too, when it and a real
+  // top-of-page anchor would otherwise be indistinguishable.
+  const aboveFold = (rect) => rect.width > 0 && rect.height > 0 && rect.bottom <= 0 && rect.left > -rect.width && rect.left < innerWidth && scrollY > 150 && rect.top + scrollY > 150
+
   // Distinct from being merely off-screen (which scrollIntoView fixes): an
   // on-screen element with something else on top of it at its own visual
   // center -- a modal, a cookie banner, a sticky header -- is genuinely not
@@ -93,15 +108,16 @@ if (!globalThis.__sembrowseLocalAttached) {
     if (!element.matches("a[href]")) return false
     if (!cssVisible(element)) return false
     const rect = element.getBoundingClientRect()
-    // A real <a href> that merely needs scrollIntoView (below the fold) is
-    // a fine candidate. Two other things that make visible() reject it are
-    // not: on-screen but covered by something else (a modal, an overlay --
-    // scrolling never fixes that), and parked off in negative-coordinate
-    // space by the keyboard skip-link pattern (verified live: Amazon's
-    // "Search alt+/", "Cart shift+alt+C" -- these move on screen only on
-    // :focus, so scrolling toward them reveals nothing usable either).
+    // A real <a href> that merely needs scrollIntoView (below the fold, or
+    // scrolled past above it) is a fine candidate. Two other things that
+    // make visible() reject it are not: on-screen but covered by something
+    // else (a modal, an overlay -- scrolling never fixes that), and parked
+    // off in negative-coordinate space by the keyboard skip-link pattern
+    // (verified live: Amazon's "Search alt+/", "Cart shift+alt+C" -- these
+    // move on screen only on :focus, so scrolling toward them reveals
+    // nothing usable either).
     if (onScreen(rect) && occluded(element, rect)) return false
-    if (!onScreen(rect) && !belowFold(rect)) return false
+    if (!onScreen(rect) && !belowFold(rect) && !aboveFold(rect)) return false
     return true
   }
 
@@ -140,20 +156,26 @@ if (!globalThis.__sembrowseLocalAttached) {
     return out ? out.slice(0, 512) : document.body.innerText.slice(0, 512)
   }
 
-  // A single-line <input> that's either explicitly type=search, or the
-  // ONLY text-like field in its <form>, submits on Enter by convention --
-  // that's what a real user does after typing a search query, and treating
-  // "type" and "submit" as two independent decisions is exactly the kind
-  // of two-step plan a small local model unreliably follows through on.
-  // Deliberately <input>-only (never textarea/contenteditable): a
-  // multi-line field's Enter conventionally means "newline", not "submit".
+  // A single-line <input> that's genuinely a search box submits on Enter by
+  // convention -- that's what a real user does after typing a search query,
+  // and treating "type" and "submit" as two independent decisions is
+  // exactly the kind of two-step plan a small local model unreliably
+  // follows through on. Deliberately <input>-only (never textarea/
+  // contenteditable): a multi-line field's Enter conventionally means
+  // "newline", not "submit". Requires an actual search signal (type=search,
+  // or "search" in the field's own name/id/placeholder/aria-label/role, or
+  // the enclosing form marked role=search) rather than inferring it from
+  // "the only text field in the form" -- that fallback also matched a
+  // single-field login, coupon-code, or newsletter-signup form, silently
+  // submitting them the moment the model typed text into them, which is not
+  // a decision the model ever made.
   const isSearchLikeInput = (element) => {
     if (element.tagName !== "INPUT") return false
     if (element.type === "search") return true
+    const ownSignal = [element.getAttribute("name"), element.getAttribute("id"), element.getAttribute("placeholder"), element.getAttribute("aria-label"), element.getAttribute("role")].join(" ").toLowerCase()
+    if (/search/.test(ownSignal)) return true
     const form = element.form
-    if (!form) return false
-    const textLike = "input:not([type]), input[type=text], input[type=search], input[type=email], input[type=tel], input[type=url], input[type=number]"
-    return Array.from(form.querySelectorAll(textLike)).filter((el) => !el.disabled).length === 1
+    return !!form && form.getAttribute("role") === "search"
   }
 
   const githubAccounts = () => {

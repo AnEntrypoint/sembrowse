@@ -395,6 +395,12 @@ const isPlausibleUrl = (raw) => {
     const url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`)
     if (url.protocol !== "https:" && url.protocol !== "http:") return null
     if (!/^[a-z0-9.-]+$/i.test(url.hostname)) return null
+    // A bare word ("amazon") is a syntactically valid hostname under WHATWG
+    // rules but never a real one for this feature's use (the homepage of a
+    // named website always has a TLD) -- require an actual dotted label so a
+    // one-word non-answer doesn't get treated as a plausible navigation
+    // target.
+    if (!/\.[a-z]{2,}$/i.test(url.hostname)) return null
     return url.href
   } catch {
     return null

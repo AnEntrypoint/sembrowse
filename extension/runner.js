@@ -165,12 +165,12 @@ const snapshotFor = async (tabId, goal, windowId, needsScreenshot) => {
   const [response, screenshot] = await Promise.all([
     timed(chrome.tabs.sendMessage(tabId, { type: "sembrowse-candidates", goal }), 15000, "Page observation was interrupted"),
     // A capture failure (e.g. a chrome:// tab, or a capture mid-navigation)
-    // should not fail the whole page observation itself -- decide() already
-    // reports "needs a page screenshot for this step" as an ordinary result
-    // error when state.screenshot ends up missing (this model has no
-    // text-only path to fall back to; verified live, its processor crashes
-    // without an image), so the step fails cleanly through the existing
-    // error-handling path instead of throwing here.
+    // never fails the whole page observation -- it resolves to null here and
+    // decide() silently falls back to a text-only prompt for that step
+    // (verified live: MiniCPM-V-4.6, unlike the earlier LFM2-VL, has no
+    // image-or-crash requirement). screenshotDegraded below exists so that
+    // silent degradation is still visible in the run's own trace instead of
+    // vanishing entirely.
     // MiniCPM-V-4.6's SigLIP2 encoder slices the screenshot into up to 9
     // tiles at 448px scale, 14x14-patch encoded (sourced live: OpenBMB's own
     // MiniCPM-V architecture docs) -- tile COUNT depends on the image's
@@ -186,6 +186,7 @@ const snapshotFor = async (tabId, goal, windowId, needsScreenshot) => {
     needsScreenshot ? chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 92 }).catch(() => null) : Promise.resolve(null)
   ])
   if (screenshot) response.state.screenshot = screenshot
+  response.state.screenshotDegraded = needsScreenshot && !screenshot
   return response
 }
 const hasPageAccess = () => chrome.permissions.contains({ origins: pageOrigins })
@@ -333,6 +334,15 @@ async function run(task) {
   // there. Repeating the identical selection needs no such coincidence.
   const deadEndKey = (candidate) => candidate.description.match(/https?:\/\/\S+/i)?.[0] || candidate.description
   const deadEnds = new Set()
+  // Two consecutive picks of the same key is not on its own proof of a dead
+  // end -- an href-less pagination control ("Next", "Load more") legitimately
+  // keeps an identical description/key across genuinely different pages, so
+  // a normal two-page browse would otherwise get its own "Next" button
+  // permanently blacklisted after the second real click. Three in a row
+  // still reliably catches an actually-stuck loop (the ad-widget case this
+  // was built for repeats indefinitely, not just twice) while giving a
+  // legitimately-repeatable control one more genuine reselection first.
+  let deadEndStreak = 0
   const history = []
   for (let step = 1; step <= 60 && !cancelled && activeRun === task.id; step += 1) {
     let snapshot
@@ -373,6 +383,7 @@ async function run(task) {
     }
     initialPageUrl ||= snapshot.state.url
     evidence.observedUrl = snapshot.state.url
+    if (snapshot.state.screenshotDegraded) appendTrace(`${step}. screenshot unavailable this step; deciding from text only`)
     const stateKey = JSON.stringify({ url: snapshot.state.url, title: snapshot.state.title, text: snapshot.state.text, scroll: snapshot.state.scroll, candidates: snapshot.candidates.map(({ id, description, mode, options }) => ({ id, description, mode, options })) })
     const wasUnchanged = priorActionWasNonWait && stateKey === previousState
     unchanged = wasUnchanged ? unchanged + 1 : 0
@@ -436,31 +447,16 @@ async function run(task) {
       try {
         // Must stay comfortably above inference_worker.js's own
         // COMPLETION_TIMEOUT_MS (the inner per-completion budget) times the
-        // worst case of two sequential completions in one decide() call (a
-        // SELECT: choose the field, then choose its option) -- this used to
-        // be the same 20000ms as that inner constant, so it always raced and
-        // won BEFORE the inner timeout ever got a chance to fire on its own,
-        // killing a genuinely still-working (if slow) vision-model decision
-        // outright instead of ever surfacing the inner timeout's own error.
-        result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: liveCandidates, remainingCalls: 120 - modelCalls }, 150000)
-      } catch (error) {
-        // A worker-side { error } payload rejects this promise (see the
-        // message-response dispatcher above) rather than resolving with an
-        // `.error` field, unlike every other result branch here -- a comment
-        // in snapshotFor() claims a screenshot-capture failure "fails
-        // cleanly through the existing error-handling path", but verified
-        // live that instead propagates all the way out of run()'s loop and
-        // ends the whole task on what chrome.tabs.captureVisibleTab's own
-        // MDN docs describe as an ordinary, transient, retryable condition
-        // (mid-navigation, or the extension's per-second capture quota).
-        // Re-observing costs one step; ending the entire task over a single
-        // dropped screenshot does not match "transient".
-        if (/needs a page screenshot/i.test(error.message)) {
-          appendTrace(`${step}. screenshot capture failed; re-observing`)
-          priorActionWasNonWait = false
-          continue
-        }
-        throw error
+        // worst case of sequential completions one decide() call can make --
+        // up to 2 for a SELECT (choose the field, then its option), or up to
+        // 4 if ENABLE_VISION_REASONING_PREPASS/ENABLE_VISION_SELF_CONSISTENCY
+        // are ever flipped on (1 reasoning pass + up to 3 votes). Sized for
+        // that worst case even though both flags default off, so flipping
+        // them on later can't silently reintroduce the old bug where this
+        // timeout used to race the inner one and win before it ever got a
+        // chance to fire on its own, killing a genuinely still-working (if
+        // slow) decision outright.
+        result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: liveCandidates, remainingCalls: 120 - modelCalls }, 260000)
       } finally {
         clearInterval(decisionTimer)
       }
@@ -470,7 +466,12 @@ async function run(task) {
     if (result.policy) appendTrace(`${step}. ${result.policy}`)
     const selectedCandidate = snapshot.candidates.find((candidate) => candidate.id === result.id)
     const selectedKey = selectedCandidate ? deadEndKey(selectedCandidate) : ""
-    if (selectedKey && selectedKey === lastDeadEndKey) deadEnds.add(selectedKey)
+    if (selectedKey && selectedKey === lastDeadEndKey) {
+      deadEndStreak += 1
+      if (deadEndStreak >= 3) deadEnds.add(selectedKey)
+    } else {
+      deadEndStreak = 0
+    }
     lastDeadEndKey = selectedKey
     if (selectedCandidate) appendTrace(`${step}. selected ${result.operation}: ${selectedCandidate.description}`)
     if (result.policy === "author-navigation" && selectedCandidate) {
