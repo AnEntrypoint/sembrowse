@@ -32,6 +32,7 @@ jobs:
       - run: node --check extension/content.js
       - run: node --check extension/popup.js
       - run: node --check extension/runner.js
+      - run: node --check extension/loop_guard.js
       - run: node --check extension/inference_worker.js
       - run: python scripts/build_extensions.py "${{ needs.version.outputs.value }}"
       - run: cd dist && sha256sum *.zip > SHA256SUMS
