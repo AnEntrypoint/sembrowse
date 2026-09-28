@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Sembrowse WebGPU",
-  "version": "0.1.34",
+  "version": "0.3.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoJs9+PsJ4IgC2JwiXa+phqzOdo3rk6HYRTQWBTCTICRrf1fp6ozO/U8alSW7MWfTsfFQUHUpqIaQc4hZh4q9IYfU+8UFI5DGSWbM5tpIIqyzKopQVWE0iS18P+BRpENHhFbK76Rr2Ogz1Pk4EhW5e80wgr/ueQuh7fa+6zWcMOXs1NtI+vFNnFiu2fV6ST380veYdXd+nb3U/LoN84fYKLycX1yv32hok1xKPuDrUFWa0V+sCGJtTCLVMZPT0sJO5V/lvb2OuOuXcHIOvOSxha6FhnE3wjCDsAqg3O00ETiPbicaU4CpgIK3ANKnaIwnOk/75O2UEdak5N9Il0gicQIDAQAB",
   "description": "Runs SemIf decisions locally through WebGPU.",
   "action": {"default_popup": "popup.html"},
   "permissions": ["storage", "activeTab", "scripting", "tabs", "windows"],

@@ -21,7 +21,7 @@ The popup requests browser page access when a task starts. Grant it to let the r
 
 The first model load downloads an exact pinned GGUF file to the browser cache after the explicit button press. The browser performs all subsequent token generation and SemIf decision scoring locally. Once the model is cached, no network access is needed for inference. Releases do not redistribute model weights.
 
-Chrome, Edge, and recent Firefox builds are the intended targets. When a WebGPU adapter is unavailable, the extension clearly reports its local compatibility runtime before model loading. The Qwen3 0.6B model is the smaller option; MiniCPM5 2B is the desktop tier; Qwen3.5 4B is a high-memory tier for devices with sufficient graphics memory and browser storage.
+Chrome, Edge, and recent Firefox builds are the intended targets. When a WebGPU adapter is unavailable, the extension clearly reports its local compatibility runtime before model loading. The Qwen3 0.6B model is the smaller option; MiniCPM5 2B is the desktop tier; Qwen3.5 4B is a high-memory tier for devices with sufficient graphics memory and browser storage; MiniCPM-V-4.6 is the vision-capable tier, seeing a screenshot of the page alongside its text on every step through the same local WebGPU runtime as every other model here.
 
 ## What it does
 
@@ -38,10 +38,13 @@ Extension pages use `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-
 - Qwen3 0.6B Q8_0: 639 MB
 - MiniCPM5 2B Q4_K_M: 1.56 GB
 - Qwen3.5 4B Q4_K_M: 3.01 GB
+- MiniCPM-V-4.6 Q4_K_M + mmproj: ~1.6 GB
 
 ## Releases
 
 Every push to `main` builds a versioned release tag from `extension/manifest.json`, publishes Chromium and Firefox MV3 archives plus `SHA256SUMS`, and marks the highest stable semantic version as latest. CI syntax-checks the extension, creates the archives, and verifies that vendored runtime files are present in them.
+
+`manifest.json`'s `key` field pins the extension's Chromium ID (`egaiolkjdgpkfeebpkokcnmejaigfppk`) so it stays identical across releases and across whichever folder a release archive is extracted into. Without it, Chrome derives an unpacked extension's ID from a hash of its install path, so each fresh extract/upgrade gets a new `chrome-extension://` origin -- and the downloaded GGUF model, cached in that origin's OPFS storage, is silently orphaned, forcing a full re-download on every version bump. Never regenerate this key; the matching private key lives outside this repo (never commit a private key here) and is only needed if the extension is ever submitted to the Chrome Web Store.
 
 ## Dynamic browser-agent compatibility
 
@@ -53,3 +56,4 @@ Runs refresh their page observation before every action, reject stale controls s
 
 - Qwen3 0.6B GGUF: [Qwen/Qwen3-0.6B-GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF)
 - MiniCPM5 2B GGUF: [openbmb/MiniCPM5-2B-GGUF](https://huggingface.co/openbmb/MiniCPM5-2B-GGUF)
+- MiniCPM-V-4.6 GGUF: [openbmb/MiniCPM-V-4.6-gguf](https://huggingface.co/openbmb/MiniCPM-V-4.6-gguf)

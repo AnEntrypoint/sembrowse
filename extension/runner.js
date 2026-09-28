@@ -6,8 +6,14 @@ const trace = document.querySelector("#trace")
 const modelArtifacts = {
   "qwen3-0.6b": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
   "minicpm5-2b": "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/resolve/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q4_K_M.gguf",
-  "qwen3.5-4b": "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/4168f45a16a1290d65a4ec0fa312ae917a4c15d6/Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+  "qwen3.5-4b": "https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/4168f45a16a1290d65a4ec0fa312ae917a4c15d6/Qwen_Qwen3.5-4B-Q4_K_M.gguf",
+  "minicpm-v-4.6": "https://huggingface.co/openbmb/MiniCPM-V-4.6-gguf/resolve/afe9accb78d2995d214cd912920c9c92f4015faa/MiniCPM-V-4_6-Q4_K_M.gguf"
 }
+// Only these models were loaded with an mmproj alongside their GGUF
+// (inference_worker.js's `visionCapable` flag) -- capturing a screenshot on
+// every step for a text-only model would just be wasted work, since nothing
+// in that model's runtime path ever reads it.
+const visionModelIds = new Set(["minicpm-v-4.6"])
 const runtimeVersion = "wllama 3.6.1"
 const worker = new Worker(`inference_worker.js?v=${chrome.runtime.getManifest().version}`, { type: "module" })
 const pending = new Map()
@@ -62,12 +68,42 @@ const request = async (type, payload = {}, timeout = 90000) => {
   if (workerFailure) return Promise.reject(new Error(workerFailure))
   const id = String(++sequence)
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(id)
-      reject(new Error(`Local model ${type} timed out`))
-    }, timeout)
-    pending.set(id, { resolve: (data) => { clearTimeout(timer); resolve(data) }, reject: (error) => { clearTimeout(timer); reject(error) } })
-    worker.postMessage({ id, type, ...payload })
+    let timer
+    // A model download can run well past any FLAT overall deadline on a
+    // slow connection -- verified live: a ~1.6GB model at ~830 KB/s needs
+    // roughly half an hour, well past this call's old fixed 600000ms
+    // budget, even though it was making perfectly healthy progress every
+    // single second the whole time ("Local model load timed out" fired at
+    // 25% with the download still actively advancing). Restarting the
+    // clock on every progress event turns this into a STALL timeout
+    // instead of a wall-clock one, so it only ever fires when the worker
+    // has genuinely stopped making progress, never on a slow-but-steady
+    // download of any size.
+    const arm = () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        pending.delete(id)
+        const message = `Local model ${type} timed out`
+        // A stuck WebGPU/WASM completion call can block the worker's own
+        // event loop synchronously, so a same-thread timer (inference_worker.js's
+        // own completionTimeout) can never preempt it -- the timer callback
+        // needs a free event loop to fire, and a blocked worker has none.
+        // Worker.terminate() is a browser-level operation that stops the
+        // thread regardless of what it is doing, so it is the only thing
+        // that actually enforces this timeout rather than just declaring
+        // the task failed while the stuck worker keeps burning GPU/CPU
+        // unseen in the background.
+        worker.terminate()
+        workerFailure = message
+        reject(new Error(message))
+      }, timeout)
+    }
+    arm()
+    pending.set(id, { resolve: (data) => { clearTimeout(timer); resolve(data) }, reject: (error) => { clearTimeout(timer); reject(error) }, arm })
+    // See inference_worker.js's `send` for why this is `reqId`, not `id`:
+    // `payload` (a "decide" call's candidates/state) must never be able to
+    // collide with the request-correlation id.
+    worker.postMessage({ ...payload, type, reqId: id })
   })
 }
 
@@ -88,11 +124,21 @@ worker.addEventListener("message", ({ data }) => {
   }
   if (data.type === "progress") {
     setStatus(data.message)
+    // Only a genuine stage change (`real: true` -- a new download
+    // percentage, a new named stage) counts as proof of progress and resets
+    // the stall timer -- inference_worker.js's own elapsed-time heartbeat
+    // (`real: false`) fires every 15s purely to keep the visible status
+    // line's counter ticking, whether or not the operation it's attached to
+    // is actually still moving, so treating THAT as proof of life would let
+    // a genuinely dead download (server dropped the connection, zero bytes
+    // arriving) spin forever showing an ever-increasing elapsed count and
+    // never time out.
+    if (data.real) for (const callback of pending.values()) callback.arm?.()
     return
   }
-  const callback = pending.get(data.id)
+  const callback = pending.get(data.reqId)
   if (!callback) return
-  pending.delete(data.id)
+  pending.delete(data.reqId)
   data.error ? callback.reject(new Error(data.error)) : callback.resolve(data)
 })
 
@@ -114,9 +160,33 @@ worker.addEventListener("messageerror", () => {
   setStatus(message)
 })
 
-const snapshotFor = async (tabId, goal) => {
+const snapshotFor = async (tabId, goal, windowId, needsScreenshot) => {
   await timed(chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] }), 15000, "Page observation timed out")
-  return timed(chrome.tabs.sendMessage(tabId, { type: "sembrowse-candidates", goal }), 15000, "Page observation was interrupted")
+  const [response, screenshot] = await Promise.all([
+    timed(chrome.tabs.sendMessage(tabId, { type: "sembrowse-candidates", goal }), 15000, "Page observation was interrupted"),
+    // A capture failure (e.g. a chrome:// tab, or a capture mid-navigation)
+    // should not fail the whole page observation itself -- decide() already
+    // reports "needs a page screenshot for this step" as an ordinary result
+    // error when state.screenshot ends up missing (this model has no
+    // text-only path to fall back to; verified live, its processor crashes
+    // without an image), so the step fails cleanly through the existing
+    // error-handling path instead of throwing here.
+    // MiniCPM-V-4.6's SigLIP2 encoder slices the screenshot into up to 9
+    // tiles at 448px scale, 14x14-patch encoded (sourced live: OpenBMB's own
+    // MiniCPM-V architecture docs) -- tile COUNT depends on the image's
+    // pixel dimensions, which this capture doesn't control and the model's
+    // own adaptive slicer already handles regardless of size, but JPEG
+    // compression artifacts within each tile are squarely this capture's own
+    // choice, and directly threaten legibility of small on-page text (a
+    // price, in particular) that quality:70 was never re-examined against
+    // when the vision model swapped. Bumped for a genuine quality reason,
+    // not a guess -- the extra bytes cost a one-time local base64 decode,
+    // never additional model-token budget (that's driven by pixel
+    // dimensions/slicing, not compression level).
+    needsScreenshot ? chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 92 }).catch(() => null) : Promise.resolve(null)
+  ])
+  if (screenshot) response.state.screenshot = screenshot
+  return response
 }
 const hasPageAccess = () => chrome.permissions.contains({ origins: pageOrigins })
 const isInjectablePage = (tab) => /^https?:\/\//i.test(tab?.url || "")
@@ -220,18 +290,55 @@ async function run(task) {
     }
   }
   setStatus("Loading local model…")
-  const loadedModel = await request("load", { modelId: task.modelId }, 600000)
+  // Short now that request() resets this on every REAL progress tick
+  // instead of enforcing one flat deadline -- this only ever has to cover a
+  // genuine stall between download percentage ticks, not the whole
+  // download, so it no longer needs to scale with model size at all. 3
+  // minutes gives real (if very slow) progress comfortable room while still
+  // catching a genuinely dead connection well before a person would give up
+  // watching it.
+  const loadedModel = await request("load", { modelId: task.modelId }, 180000)
   evidence.runtimeMode = loadedModel.runtimeMode
   let modelCalls = 0
   let unchanged = 0
   let previousState = ""
   let priorActionWasNonWait = false
+  let lastDeadEndKey = ""
+  // A candidate whose click produces literally no observable change (a real,
+  // visible <a href> intercepted by its own JS -- verified live: Amazon's
+  // "why am I seeing this ad" sponsored-placement widget renders as a normal
+  // product link but swallows the click into a feedback popover instead of
+  // navigating) is a dead end, not merely unlucky -- re-offering it lets the
+  // model reselect the same broken link every single step until the blanket
+  // 3-strikes abort below fires, even though a dozen other genuine candidates
+  // sit right next to it. Exclude it as soon as it demonstrates this, so the
+  // model is only ever offered candidates that have not already been proven
+  // dead this run.
+  //
+  // Keyed on the href inside the candidate's own description (falling back
+  // to the full description for non-anchor candidates), never on its action
+  // fingerprint -- verified live that exact widget also flips its own
+  // aria-expanded between clicks, which changes the fingerprint every other
+  // observation and made a fingerprint-keyed exclusion never actually match
+  // the same link twice in a row. The href stays byte-identical regardless.
+  //
+  // Triggered by picking the SAME key two decisions in a row, never by the
+  // surrounding page state being byte-identical -- verified live on the real
+  // Amazon page that a dead click can still get re-selected two and three
+  // times running even though this exclusion was already wired, because a
+  // busy commercial page (rotating recommendation carousels, lazy-loaded
+  // widgets, tracking pixels) rarely reproduces an EXACT match on the full
+  // state key even when nothing that matters changed, so the unchanged-state
+  // condition the exclusion originally rode on almost never actually fires
+  // there. Repeating the identical selection needs no such coincidence.
+  const deadEndKey = (candidate) => candidate.description.match(/https?:\/\/\S+/i)?.[0] || candidate.description
+  const deadEnds = new Set()
   const history = []
   for (let step = 1; step <= 60 && !cancelled && activeRun === task.id; step += 1) {
     let snapshot
     try {
       setStatus("Observing the current page…")
-      snapshot = await snapshotFor(task.tabId, task.goal)
+      snapshot = await snapshotFor(task.tabId, task.goal, task.windowId, visionModelIds.has(task.modelId))
     } catch (error) {
       if (!await hasPageAccess()) {
         setStatus("Page access was revoked; restart from the Sembrowse popup")
@@ -267,7 +374,8 @@ async function run(task) {
     initialPageUrl ||= snapshot.state.url
     evidence.observedUrl = snapshot.state.url
     const stateKey = JSON.stringify({ url: snapshot.state.url, title: snapshot.state.title, text: snapshot.state.text, scroll: snapshot.state.scroll, candidates: snapshot.candidates.map(({ id, description, mode, options }) => ({ id, description, mode, options })) })
-    unchanged = priorActionWasNonWait && stateKey === previousState ? unchanged + 1 : 0
+    const wasUnchanged = priorActionWasNonWait && stateKey === previousState
+    unchanged = wasUnchanged ? unchanged + 1 : 0
     previousState = stateKey
     if (unchanged >= 3) {
       setStatus("Task blocked after three unchanged non-wait actions")
@@ -277,18 +385,18 @@ async function run(task) {
       setStatus("Task stopped at the 120 local model-call limit")
       return
     }
-    const candidateUrl = (candidate) => candidate.description.match(/https?:\/\/\S+/i)?.[0] || ""
+    const liveCandidates = deadEnds.size ? snapshot.candidates.filter((candidate) => !deadEnds.has(deadEndKey(candidate))) : snapshot.candidates
     const githubPath = (candidate) => {
       try {
-        const destination = new URL(candidateUrl(candidate))
+        const destination = new URL(deadEndKey(candidate))
         return destination.hostname.toLowerCase() === "github.com" ? destination.pathname.split("/").filter(Boolean) : []
       } catch {
         return []
       }
     }
-    const profileCandidate = authorGoal && authorHandle && snapshot.candidates.find((candidate) => githubPath(candidate).map((part) => part.toLowerCase()).join("/") === authorHandle.toLowerCase())
-    const repositoryCandidate = authorGoal && !authorHandle && new URL(snapshot.state.url).hostname !== "github.com" && snapshot.candidates.find((candidate) => githubPath(candidate).length >= 2)
-    const clickCandidates = snapshot.candidates.filter((candidate) => candidate.mode === "CLICK")
+    const profileCandidate = authorGoal && authorHandle && liveCandidates.find((candidate) => githubPath(candidate).map((part) => part.toLowerCase()).join("/") === authorHandle.toLowerCase())
+    const repositoryCandidate = authorGoal && !authorHandle && new URL(snapshot.state.url).hostname !== "github.com" && liveCandidates.find((candidate) => githubPath(candidate).length >= 2)
+    const clickCandidates = liveCandidates.filter((candidate) => candidate.mode === "CLICK")
     const singleClickGoal = /\b(click|browse|go|navigate|open|visit)\b/i.test(task.goal)
     let githubPagesAuthor = ""
     if (authorGoal && !authorHandle) {
@@ -326,7 +434,33 @@ async function run(task) {
         setStatus(`Choosing the next local browser action… (${decisionElapsed}s)`)
       }, 5000)
       try {
-        result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: snapshot.candidates, remainingCalls: 120 - modelCalls, allowDone: false }, 90000)
+        // Must stay comfortably above inference_worker.js's own
+        // COMPLETION_TIMEOUT_MS (the inner per-completion budget) times the
+        // worst case of two sequential completions in one decide() call (a
+        // SELECT: choose the field, then choose its option) -- this used to
+        // be the same 20000ms as that inner constant, so it always raced and
+        // won BEFORE the inner timeout ever got a chance to fire on its own,
+        // killing a genuinely still-working (if slow) vision-model decision
+        // outright instead of ever surfacing the inner timeout's own error.
+        result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates: liveCandidates, remainingCalls: 120 - modelCalls }, 150000)
+      } catch (error) {
+        // A worker-side { error } payload rejects this promise (see the
+        // message-response dispatcher above) rather than resolving with an
+        // `.error` field, unlike every other result branch here -- a comment
+        // in snapshotFor() claims a screenshot-capture failure "fails
+        // cleanly through the existing error-handling path", but verified
+        // live that instead propagates all the way out of run()'s loop and
+        // ends the whole task on what chrome.tabs.captureVisibleTab's own
+        // MDN docs describe as an ordinary, transient, retryable condition
+        // (mid-navigation, or the extension's per-second capture quota).
+        // Re-observing costs one step; ending the entire task over a single
+        // dropped screenshot does not match "transient".
+        if (/needs a page screenshot/i.test(error.message)) {
+          appendTrace(`${step}. screenshot capture failed; re-observing`)
+          priorActionWasNonWait = false
+          continue
+        }
+        throw error
       } finally {
         clearInterval(decisionTimer)
       }
@@ -335,12 +469,38 @@ async function run(task) {
     modelCalls += result.calls || 0
     if (result.policy) appendTrace(`${step}. ${result.policy}`)
     const selectedCandidate = snapshot.candidates.find((candidate) => candidate.id === result.id)
+    const selectedKey = selectedCandidate ? deadEndKey(selectedCandidate) : ""
+    if (selectedKey && selectedKey === lastDeadEndKey) deadEnds.add(selectedKey)
+    lastDeadEndKey = selectedKey
     if (selectedCandidate) appendTrace(`${step}. selected ${result.operation}: ${selectedCandidate.description}`)
     if (result.policy === "author-navigation" && selectedCandidate) {
       const path = githubPath(selectedCandidate)
       if (path.length >= 2) authorHandle = path[0]
     }
-    if (result.operation === "DONE" && !canCompleteAt(snapshot.state.url)) {
+    if (result.operation === "NAVIGATE_URL") {
+      let destination
+      try {
+        destination = new URL(result.url)
+      } catch {
+        setStatus("Local model returned an invalid navigation target")
+        return
+      }
+      if (destination.protocol !== "https:" && destination.protocol !== "http:") {
+        setStatus("Local model returned an unsafe navigation target")
+        return
+      }
+      appendTrace(`${step}. navigate-url: ${destination.href}`)
+      await chrome.tabs.update(task.tabId, { url: destination.href })
+      if (!await waitForTabComplete(task.tabId)) {
+        setStatus("Browser navigation did not complete")
+        return
+      }
+      history.push(`NAVIGATE_URL: ${destination.href}`)
+      if (history.length > 6) history.shift()
+      priorActionWasNonWait = true
+      continue
+    }
+    if (navigationGoal && result.operation === "DONE" && !canCompleteAt(snapshot.state.url)) {
       appendTrace(`${step}. rejected DONE: destination has not met the task completion check`)
       history.push("DONE rejected: the destination does not yet meet the task completion check")
       if (history.length > 6) history.shift()
@@ -359,9 +519,18 @@ async function run(task) {
     }
     let executed
     try {
-      executed = await timed(chrome.tabs.sendMessage(task.tabId, { type: "sembrowse-execute", fingerprint: snapshot.fingerprint, ...result }), 15000, "Action receiver was interrupted")
+      // `result` (the worker's decision) carries its own `type: "decision"`
+      // field -- spreading it after the initial `type: "sembrowse-execute"`
+      // silently overwrote that back to "decision" every time, so
+      // content.js's `message.type === "sembrowse-execute"` check never
+      // matched, sendResponse was never called, and every execute call
+      // resolved `undefined` regardless of site or operation (verified
+      // live: 100% of CLICK/TYPE_TEXT actions across every run). Exact same
+      // object-spread-collision bug class as inference_worker.js's `send()`
+      // (fixed via `reqId`), just the mirror-image direction here.
+      executed = await timed(chrome.tabs.sendMessage(task.tabId, { fingerprint: snapshot.fingerprint, ...result, type: "sembrowse-execute" }), 15000, "Action receiver was interrupted")
     } catch (error) {
-      appendTrace(`${step}. stale action discarded`)
+      appendTrace(`${step}. stale action discarded: ${error.message}`)
       priorActionWasNonWait = false
       await sleep(100)
       continue
