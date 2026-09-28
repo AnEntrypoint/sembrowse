@@ -176,8 +176,18 @@ if (!globalThis.__sembrowseLocalAttached) {
   // type=password is not the only way a field holds a credential -- a
   // custom password-visibility toggle commonly swaps in type=text while
   // keeping autocomplete=current-password/new-password, which a bare
-  // input[type=password] check misses entirely.
-  const isPasswordLike = (input) => input.type === "password" || /(?:^|\s)(?:current|new)-password(?:\s|$)/i.test(input.getAttribute("autocomplete") || "")
+  // input[type=password] check misses entirely. A toggle that also omits
+  // autocomplete (a common legacy anti-autofill pattern) still usually
+  // names itself "password"/"pwd"/"pin"/"passcode" in its own attributes --
+  // the same kind of self-declared signal isSearchLikeInput already trusts
+  // for "search" below. An unlabeled, unautocompleted, non-type=password
+  // toggle is a residual gap this can't close cheaply; disclosed, not fixed.
+  const isPasswordLike = (input) => {
+    if (input.type === "password") return true
+    if (/(?:^|\s)(?:current|new)-password(?:\s|$)/i.test(input.getAttribute("autocomplete") || "")) return true
+    const ownSignal = [input.getAttribute("name"), input.getAttribute("id"), input.getAttribute("placeholder"), input.getAttribute("aria-label")].join(" ").toLowerCase()
+    return /passcode|password|\bpwd\b|\bpin\b/.test(ownSignal)
+  }
   const isSearchLikeInput = (element) => {
     if (element.tagName !== "INPUT") return false
     if (element.type === "search") return true
