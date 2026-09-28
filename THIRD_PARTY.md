@@ -7,4 +7,4 @@ Sembrowse's direct-choice design is based on these MIT-licensed projects:
 
 The release archives vendor the browser runtime from [ngxson/wllama 3.6.1](https://github.com/ngxson/wllama/releases/tag/v3.6.1). Its license is distributed with the runtime at `extension/vendor/wllama/LICENCE`.
 
-Model weights are not bundled or redistributed. The popup points only to pinned GGUF revisions chosen by the user.
+Model weights are not bundled or redistributed. The popup points only to pinned GGUF revisions chosen by the developer.

@@ -7,6 +7,8 @@ const MAX_CANDIDATE_OPTIONS = 20
 const PROMPT_HISTORY_LINES = 6
 const PROMPT_TEXT_CHARS = 1200
 const PROMPT_URL_CHARS = 96
+const PROMPT_LINE_CHARS = 240
+const CANDIDATE_MODES = new Set(["CLICK", "TYPE_TEXT", "SELECT"])
 const SUBMIT_OPTIONS = [
   { id: "SUBMIT", description: "SUBMIT: press Enter right after typing, for example in a search box" },
   { id: "KEEP", description: "KEEP: leave the text typed without submitting, for example one field of a longer form" }
@@ -52,10 +54,21 @@ const collapse = (text) => String(text ?? "").replace(/\s+/g, " ").trim()
 const clip = (text, chars) => collapse(text).slice(0, chars)
 const labelsFor = (count) => Array.from({ length: count }, (_, index) => String.fromCharCode(65 + index))
 
-const completionTimeout = (promise) => Promise.race([
-  promise,
-  new Promise((_, reject) => setTimeout(() => reject(new Error(`Local model call did not respond within ${COMPLETION_TIMEOUT_MS / 1000}s`)), COMPLETION_TIMEOUT_MS))
-])
+const complete = async (request) => {
+  const controller = new AbortController()
+  let timer
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error(`Local model call did not respond within ${COMPLETION_TIMEOUT_MS / 1000}s`))
+    }, COMPLETION_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([engine.createChatCompletion({ ...request, abortSignal: controller.signal }), expiry])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 const supportsWebGPU = async () => {
   if (!navigator.gpu) return false
@@ -88,16 +101,12 @@ const waitAtStage = async (message, operation) => {
 async function initializeModel() {
   const { Wllama, LoggerWithoutDebug } = await waitAtStage("Preparing local model runtime…", () => getRuntime())
   const loadedEngine = new Wllama({ default: new URL("./vendor/wllama/wasm/wllama.wasm", self.location.href).href }, { logger: LoggerWithoutDebug, suppressNativeLog: true, parallelDownloads: 4 })
+  loadedEngine.setCompat({
+    worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,
+    wasm: new URL("./vendor/wllama/compat/wllama.wasm", self.location.href).href
+  }, "always")
   runtimeMode = await supportsWebGPU() ? "webgpu" : "compatibility"
-  if (runtimeMode === "compatibility") {
-    loadedEngine.setCompat({
-      worker: new URL("./vendor/wllama/compat/wllama.js", self.location.href).href,
-      wasm: new URL("./vendor/wllama/compat/wllama.wasm", self.location.href).href
-    }, "always")
-    reportProgress("WebGPU is unavailable; using the local compatibility runtime…")
-  } else {
-    reportProgress("WebGPU adapter is ready; using the local WebGPU runtime…")
-  }
+  reportProgress(runtimeMode === "webgpu" ? "WebGPU adapter is ready; using the local WebGPU runtime…" : "WebGPU is unavailable; using the local compatibility runtime…")
   let loaded = false
   try {
     await waitAtStage("Opening the browser-cached model…", (setStage) => loadedEngine.loadModelFromUrl(selected.mmprojUrl ? { url: selected.url, mmprojUrl: selected.mmprojUrl } : selected.url, {
@@ -127,6 +136,8 @@ async function initializeModel() {
 const readyPayload = () => ({ type: "ready", runtimeMode, visionCapable, artifact: selected.url })
 
 async function load(reqId, modelId) {
+  if (!Object.hasOwn(models, modelId)) return send(reqId, { error: "Choose a supported browser model" })
+  if (engine && selected !== models[modelId]) return send(reqId, { error: "A different browser model is already loaded" })
   if (engine) return send(reqId, readyPayload())
   if (loading && loadingModelId !== modelId) return send(reqId, { error: "A different browser model is already loading" })
   if (!loading) {
@@ -149,7 +160,8 @@ const screenshotBytes = (dataUrl) => {
   return bytes
 }
 
-const shortenUrls = (text) => text.replace(/https?:\/\/\S+/g, (url) => url.length > PROMPT_URL_CHARS ? `${url.slice(0, PROMPT_URL_CHARS)}…` : url)
+const shortenUrls = (text) => text.replace(/https?:\/\/\S+/gi, (url) => url.length > PROMPT_URL_CHARS ? `${url.slice(0, PROMPT_URL_CHARS)}…` : url)
+const promptLine = (text) => clip(shortenUrls(collapse(text)), PROMPT_LINE_CHARS)
 
 const scrollSummary = (scroll) => {
   if (!scroll) return "unknown"
@@ -161,11 +173,13 @@ const scrollSummary = (scroll) => {
   return "the whole page fits on screen"
 }
 
+const frameNotice = (state) => state.coveringFrames > 0 ? "\nNote: a full-page embedded frame covers this page; its controls cannot be seen or used from here." : ""
+
 const describeState = (goal, state) => [
   `Goal:\n${clip(goal, 256)}`,
-  `Page title: ${clip(state.title, 100)}\nPage URL: ${clip(state.url, 160)}\nView: ${scrollSummary(state.scroll)}`,
+  `Page title: ${clip(state.title, 100)}\nPage URL: ${clip(state.url, 160)}\nView: ${scrollSummary(state.scroll)}${frameNotice(state)}`,
   `Visible text:\n${clip(state.text, PROMPT_TEXT_CHARS)}`,
-  `Recent actions:\n${state.history?.slice(-PROMPT_HISTORY_LINES).join("\n") || "none"}`
+  `Recent actions:\n${(Array.isArray(state.history) ? state.history : []).slice(-PROMPT_HISTORY_LINES).map(promptLine).join("\n") || "none"}`
 ].join("\n\n")
 
 const withImage = (text, image) => image ? [{ type: "image", data: image }, { type: "text", text }] : text
@@ -181,10 +195,10 @@ async function chooseOne(context, options, instruction, budget, image) {
     ;[order[index], order[other]] = [order[other], order[index]]
   }
   const labels = labelsFor(order.length)
-  const listing = order.map((optionIndex, position) => `${labels[position]}. ${shortenUrls(options[optionIndex].description)}`).join("\n")
+  const listing = order.map((optionIndex, position) => `${labels[position]}. ${promptLine(options[optionIndex].description)}`).join("\n")
   const grammar = `root ::= ${labels.map((label) => `"${label}"`).join(" | ")}`
   try {
-    const response = await completionTimeout(engine.createChatCompletion({
+    const response = await complete({
       messages: [
         { role: "system", content: "Choose exactly one allowed letter for the next browser step." },
         { role: "user", content: withImage(`${context}\n\n${instruction}\n${listing}`, image) }
@@ -196,7 +210,7 @@ async function chooseOne(context, options, instruction, budget, image) {
       grammar,
       cache_prompt: true,
       chat_template_kwargs: { enable_thinking: false }
-    }))
+    })
     const label = String(response.choices?.[0]?.message?.content ?? response.choices?.[0]?.text ?? "").trim()
     const position = labels.indexOf(label)
     if (position < 0) return { error: "The browser model did not choose a compatible action" }
@@ -210,22 +224,28 @@ async function generateText(system, userText, maxTokens, budget, image) {
   if (budget.calls >= budget.limit) return { error: "The local model-call budget is exhausted" }
   budget.calls += 1
   try {
-    const response = await completionTimeout(engine.createChatCompletion({
+    const response = await complete({
       messages: [{ role: "system", content: system }, { role: "user", content: withImage(userText, image) }],
       max_tokens: maxTokens,
       temperature: 0,
       cache_prompt: true,
       chat_template_kwargs: { enable_thinking: false }
-    }))
+    })
     return { text: response.choices?.[0]?.message?.content?.trim() ?? "" }
   } catch (error) {
     return { error: error?.message ?? String(error) }
   }
 }
 
+const extractUrlText = (raw) => {
+  const embedded = raw.match(/https?:\/\/[^\s<>`"'()]+/i)?.[0]
+  return (embedded ?? raw.trim().replace(/^['"<`]+|['">`]+$/g, "")).replace(/[.,;]+$/, "")
+}
+
 const isPlausibleUrl = (raw) => {
-  if (!raw || /\s/.test(raw)) return null
-  const text = raw.replace(/^['"]|['"]$/g, "")
+  if (!raw) return null
+  const text = extractUrlText(raw)
+  if (!text || /\s/.test(text)) return null
   try {
     const url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`)
     if (url.protocol !== "https:" && url.protocol !== "http:") return null
@@ -241,22 +261,23 @@ const isPlausibleUrl = (raw) => {
 async function realizeTypeText(context, option, budget, image) {
   const typed = await generateText(
     "Return only the short text that belongs in the selected browser field. Do not add quotes, labels, or explanation.",
-    `${context}\n\nField:\n${shortenUrls(option.description)}`,
+    `${context}\n\nField:\n${promptLine(option.description)}`,
     64,
     budget,
     image
   )
   if (typed.error) return typed
-  const text = typed.text.replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").slice(0, 256)
+  const text = collapse(typed.text).replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").slice(0, 256)
   if (!text) return { error: "The local model did not generate field text" }
-  const submitChoice = await chooseOne(`${context}\n\nField:\n${shortenUrls(option.description)}\nText just typed into it: ${text}`, SUBMIT_OPTIONS, "After typing, choose what happens next:", budget, image)
-  return { decision: { operation: "TYPE_TEXT", id: option.id, text, submit: submitChoice.option?.id === "SUBMIT" } }
+  const submitChoice = await chooseOne(`${context}\n\nField:\n${promptLine(option.description)}\nText just typed into it: ${promptLine(text)}`, SUBMIT_OPTIONS, "After typing, choose what happens next:", budget, image)
+  if (submitChoice.error) return submitChoice
+  return { decision: { operation: "TYPE_TEXT", id: option.id, text, submit: submitChoice.option.id === "SUBMIT" } }
 }
 
 async function realizeSelect(context, option, budget, image) {
   if (!option.options?.length) return { error: "The dropdown has no options" }
   if (option.options.length === 1) return { decision: { operation: "SELECT", id: option.id, optionIndex: option.options[0].index } }
-  const choice = await chooseOne(`${context}\n\nDropdown:\n${shortenUrls(option.description)}`, option.options.map(({ index, description }) => ({ id: String(index), description })), "Choose the observed native dropdown option:", budget, image)
+  const choice = await chooseOne(`${context}\n\nDropdown:\n${promptLine(option.description)}`, option.options.map(({ index, description }) => ({ id: String(index), description })), "Choose the observed native dropdown option:", budget, image)
   if (choice.error) return choice
   return { decision: { operation: "SELECT", id: option.id, optionIndex: Number(choice.option.id) } }
 }
@@ -291,11 +312,23 @@ const operationOptions = (scroll) => [
   { id: "__blocked__", mode: "BLOCKED", description: "BLOCKED: the goal cannot be advanced from this page (login wall, error page, nothing relevant to do)" }
 ].filter(Boolean)
 
+const offeredCandidates = (candidates) => (Array.isArray(candidates) ? candidates : [])
+  .filter((candidate) => candidate && CANDIDATE_MODES.has(candidate.mode) && typeof candidate.description === "string" && candidate.id != null)
+  .slice(0, MAX_CANDIDATE_OPTIONS)
+
 async function decide(reqId, state, goal, candidates, remainingCalls) {
   const budget = { calls: 0, limit: Math.min(Math.max(Number(remainingCalls) || 0, 0), MAX_CALLS_PER_DECISION) }
+  try {
+    await decideWithin(budget, reqId, state, goal, candidates)
+  } catch (error) {
+    send(reqId, { error: error?.message ?? String(error), calls: budget.calls })
+  }
+}
+
+async function decideWithin(budget, reqId, state, goal, candidates) {
   const image = visionCapable && state.screenshot ? screenshotBytes(state.screenshot) : undefined
   const context = describeState(goal, state)
-  let options = [...(Array.isArray(candidates) ? candidates : []).slice(0, MAX_CANDIDATE_OPTIONS), ...operationOptions(state.scroll)]
+  let options = [...offeredCandidates(candidates), ...operationOptions(state.scroll)]
   let lastError = ""
   while (options.length >= 2) {
     const chosen = await chooseOne(context, options, "Choose the next action that most directly advances the goal:", budget, image)

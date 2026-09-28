@@ -1,9 +1,12 @@
 const SAME_PAGE_SIMILARITY = 0.8
-const UNCHANGED_LIMIT = 3
+const UNCHANGED_LIMIT = 4
+const UNCHANGED_WARNING = 2
+const STALE_LIMIT = 8
 const DEAD_END_PICKS = 3
 const CYCLE_MAX_PERIOD = 3
 const CYCLE_REPEATS = 2
 const MAX_CONSECUTIVE_WAITS = 5
+const FIELD_OPERATIONS = new Set(["TYPE_TEXT", "SELECT"])
 
 const wordSet = (text) => new Set(String(text ?? "").toLowerCase().match(/[a-z0-9]{2,}/g) || [])
 
@@ -34,6 +37,7 @@ const createLoopGuard = () => {
   let waits = 0
   let lastWasNonWait = false
   let warning = null
+  let staleStreak = 0
 
   const observe = (state) => {
     const words = wordSet(state.text)
@@ -41,17 +45,22 @@ const createLoopGuard = () => {
     previous = { url: state.url, words }
     if (changed) pickCounts.clear()
     unchanged = lastWasNonWait && !changed ? unchanged + 1 : 0
-    return { changed, blocked: unchanged >= UNCHANGED_LIMIT }
+    return { changed, blocked: unchanged >= UNCHANGED_LIMIT, warn: unchanged === UNCHANGED_WARNING }
   }
 
   const liveCandidates = (url, candidates) => candidates.filter((candidate) => !deadEnds.has(`${url}#${candidate.key}`))
 
   const markStale = () => {
     lastWasNonWait = false
+    staleStreak += 1
+    return staleStreak >= STALE_LIMIT
   }
 
+  const exclude = (url, key) => deadEnds.add(`${url}#${key}`)
+
   const record = ({ url, operation, key = "", detail = "" }) => {
-    lastWasNonWait = operation !== "WAIT"
+    lastWasNonWait = !FIELD_OPERATIONS.has(operation) && operation !== "WAIT"
+    staleStreak = 0
     waits = operation === "WAIT" ? waits + 1 : 0
     if (key) {
       const pick = `${url}#${key}`
@@ -74,5 +83,5 @@ const createLoopGuard = () => {
     return { verdict: "ok" }
   }
 
-  return { observe, liveCandidates, markStale, record, deadEnds }
+  return { observe, liveCandidates, markStale, exclude, record, deadEnds }
 }
