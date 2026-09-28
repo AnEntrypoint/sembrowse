@@ -13,6 +13,19 @@ const SUBMIT_OPTIONS = [
   { id: "SUBMIT", description: "SUBMIT: press Enter right after typing, for example in a search box" },
   { id: "KEEP", description: "KEEP: leave the text typed without submitting, for example one field of a longer form" }
 ]
+const DONE_CHECK_OPTIONS = [
+  { id: "YES", description: "Yes: the goal is already completely achieved on this page" },
+  { id: "NO", description: "No: something more still has to be done to achieve the goal" }
+]
+const TYPE_TEXT_SYSTEM = [
+  "You write the exact text a user types into a browser field to advance their goal.",
+  "For a search box, write only the search keywords taken from the goal: leave out words like search, find, look up, and site names.",
+  "If the goal supplies the value the field wants (an email address, a name, a number), write that value exactly.",
+  "Never repeat the field's own label or placeholder. Output only the text, nothing else.",
+  "Examples:",
+  "Goal: find the best price on running shoes\nField label: Search the store\nText: running shoes",
+  "Goal: sign up for updates using sam@mail.org\nField label: Email\nText: sam@mail.org"
+].join("\n")
 
 const models = {
   "qwen3-0.6b": { url: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf" },
@@ -184,7 +197,7 @@ const describeState = (goal, state) => [
 
 const withImage = (text, image) => image ? [{ type: "image", data: image }, { type: "text", text }] : text
 
-async function chooseOne(context, options, instruction, budget, image) {
+async function chooseOne(context, options, instruction, budget, image, question) {
   if (!engine || !selected) return { error: "Load a browser model first" }
   if (options.length < 2 || options.length > 26) return { error: "The browser decision needs 2 to 26 compatible choices" }
   if (budget.calls >= budget.limit) return { error: "The local model-call budget is exhausted" }
@@ -200,8 +213,8 @@ async function chooseOne(context, options, instruction, budget, image) {
   try {
     const response = await complete({
       messages: [
-        { role: "system", content: "Choose exactly one allowed letter for the next browser step." },
-        { role: "user", content: withImage(`${context}\n\n${instruction}\n${listing}`, image) }
+        { role: "system", content: question ? "Answer with exactly one allowed letter." : "Choose exactly one allowed letter for the next browser step." },
+        { role: "user", content: withImage(question ? `${context}\n\n${listing}\n\n${question}` : `${context}\n\n${instruction}\n${listing}`, image) }
       ],
       max_tokens: 1,
       temperature: 0,
@@ -258,17 +271,15 @@ const isPlausibleUrl = (raw) => {
   }
 }
 
-async function realizeTypeText(context, option, budget, image) {
-  const typed = await generateText(
-    "Return only the short text that belongs in the selected browser field. Do not add quotes, labels, or explanation.",
-    `${context}\n\nField:\n${promptLine(option.description)}`,
-    64,
-    budget,
-    image
-  )
+const fieldLabel = (option) => collapse(option.description.replace(/^[a-z]+:\s*/i, ""))
+
+async function realizeTypeText(context, option, goal, budget, image) {
+  const label = fieldLabel(option)
+  const typed = await generateText(TYPE_TEXT_SYSTEM, `Goal: ${clip(goal, 256)}\nField label: ${clip(label, PROMPT_LINE_CHARS)}\nText:`, 64, budget)
   if (typed.error) return typed
   const text = collapse(typed.text).replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").slice(0, 256)
   if (!text) return { error: "The local model did not generate field text" }
+  if (text.toLowerCase() === label.toLowerCase()) return { error: "The local model repeated the field label instead of text to type" }
   const submitChoice = await chooseOne(`${context}\n\nField:\n${promptLine(option.description)}\nText just typed into it: ${promptLine(text)}`, SUBMIT_OPTIONS, "After typing, choose what happens next:", budget, image)
   if (submitChoice.error) return submitChoice
   return { decision: { operation: "TYPE_TEXT", id: option.id, text, submit: submitChoice.option.id === "SUBMIT" } }
@@ -296,7 +307,7 @@ async function realizeNavigateUrl(goal, budget, image) {
 }
 
 const realize = (option, context, goal, budget, image) => {
-  if (option.mode === "TYPE_TEXT") return realizeTypeText(context, option, budget, image)
+  if (option.mode === "TYPE_TEXT") return realizeTypeText(context, option, goal, budget, image)
   if (option.mode === "SELECT") return realizeSelect(context, option, budget, image)
   if (option.mode === "NAVIGATE_URL") return realizeNavigateUrl(goal, budget, image)
   if (option.mode === "CLICK") return Promise.resolve({ decision: { operation: "CLICK", id: option.id } })
@@ -333,6 +344,14 @@ async function decideWithin(budget, reqId, state, goal, candidates) {
   while (options.length >= 2) {
     const chosen = await chooseOne(context, options, "Choose the next action that most directly advances the goal:", budget, image)
     if (chosen.error) return send(reqId, { error: lastError || chosen.error, calls: budget.calls })
+    if (chosen.option.mode === "DONE") {
+      const verdict = await chooseOne(context, DONE_CHECK_OPTIONS, "", budget, image, `Is the goal "${clip(goal, 256)}" completely achieved on this page right now?`)
+      if (verdict.error) return send(reqId, { error: lastError || verdict.error, calls: budget.calls })
+      if (verdict.option.id !== "YES") {
+        options = options.filter((option) => option !== chosen.option)
+        continue
+      }
+    }
     const outcome = await realize(chosen.option, context, goal, budget, image)
     if (!outcome.error) return send(reqId, { type: "decision", ...outcome.decision, calls: budget.calls })
     lastError = outcome.error
