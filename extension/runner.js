@@ -15,7 +15,6 @@ const MIN_CALLS_PER_DECISION = 3
 const SETTLE_TYPING_MS = 500
 const SETTLE_ACTION_MS = 250
 const SETTLE_WAIT_MS = 100
-const PLAN_TIMEOUT_MS = 90000
 const RETRY_DELAY_MS = 300
 const DECIDE_FAILURE_LIMIT = 3
 const CANDIDATE_OPERATIONS = new Set(["CLICK", "TYPE_TEXT", "SELECT"])
@@ -278,16 +277,6 @@ async function run(task) {
   }
   let modelCalls = 0
   let decideFailures = 0
-  let plan = ""
-  try {
-    const planned = await request("plan", { goal: task.goal }, PLAN_TIMEOUT_MS)
-    modelCalls += planned.calls || 0
-    plan = planned.text
-    if (plan) appendTrace(`plan: ${plan.split("\n").join(" ")}`)
-  } catch (error) {
-    if (workerFailure) throw error
-    appendTrace(`planning failed: ${error.message}`)
-  }
 
   for (let step = 1; step <= MAX_STEPS && !halted(); step += 1) {
     const observation = await observe(task, loadedModel.visionCapable)
@@ -316,7 +305,7 @@ async function run(task) {
     }, 5000)
     let result
     try {
-      result = await request("decide", { state: { ...snapshot.state, history, plan }, goal: task.goal, candidates, remainingCalls: MAX_MODEL_CALLS - modelCalls }, DECIDE_TIMEOUT_MS)
+      result = await request("decide", { state: { ...snapshot.state, history }, goal: task.goal, candidates, remainingCalls: MAX_MODEL_CALLS - modelCalls }, DECIDE_TIMEOUT_MS)
       if (!result?.operation) throw Object.assign(new Error("The local model returned no operation"), { calls: result?.calls || 0 })
       if (CANDIDATE_OPERATIONS.has(result.operation) && !candidates.some((candidate) => candidate.id === result.id)) throw Object.assign(new Error("The local model chose an option that was not offered"), { calls: result.calls || 0 })
     } catch (error) {

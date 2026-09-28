@@ -16,6 +16,11 @@ Popup -> runner.html (runner.js + loop_guard.js) -> inference_worker.js (Worker)
 - Prompt carries goal, page title, URL, scroll position, 1200 chars of on-screen text, last 6 actions, every candidate (href truncated to 96 chars) plus NAVIGATE_URL, SCROLL_UP/DOWN when there is room, WAIT, DONE, BLOCKED.
 - 26 letters is the ceiling: 20 candidates + 6 operations.
 
+## Measured, no effect (real model, n=8 per cell, recorded Amazon/eBay states)
+- A model-written plan ('Use search function. Check results.'), a 'Last action' progress line, and longer SCROLL_DOWN wording did not change choices; the plan nudged toward re-searching. Plan was removed. SCROLL_DOWN and price sort were chosen 0 times in 136 decisions on results pages, so the 0.8B model does not yet complete 'find the cheapest bicycle'.
+- Live pushed-code runs (Amazon, 9-12 steps): goal typed correctly, bicycle results reached, then locale/overlay/nav controls chosen. The runner used to observe 200ms after Enter, before results loaded; settle() now waits for a loading tab.
+- Runner traces `notes` from the worker (rejected DONE checks, discarded options) and records the offered candidates per step in evidence.
+
 ## Timeouts
 - One completion 60s (20s killed genuine MiniCPM-V passes). decide 400s covers 6 calls x 60s = 360s.
 - Model load is a stall timeout reset only by real progress events (a 1.6GB download outlasts any flat deadline); the elapsed-seconds heartbeat is not progress.
