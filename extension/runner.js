@@ -198,14 +198,14 @@ async function observe(task, visionCapable) {
   try {
     setStatus("Observing the current page…")
     return { snapshot: await snapshotFor(task.tabId, task.windowId, visionCapable) }
-  } catch {
+  } catch (error) {
     if (!await hasPageAccess()) return { halt: "Page access was revoked; restart from the Sembrowse popup" }
     const tab = await chrome.tabs.get(task.tabId).catch(() => null)
     if (!tab) return { halt: "Task tab was closed; task stopped" }
     if (tab.status === "complete" && !isInjectablePage(tab)) return { halt: "Page does not allow extension access; task stopped" }
     setStatus("Waiting for page navigation…")
     if (!await waitForTabComplete(task.tabId)) return { halt: "Page did not finish loading; task stopped" }
-    return { retry: "page changed; re-observing" }
+    return { retry: `page could not be observed (${error.message}); re-observing` }
   }
 }
 
@@ -281,7 +281,7 @@ async function run(task) {
     if (observation.halt) return setStatus(observation.halt)
     const snapshot = observation.snapshot
     if (observation.retry || !snapshot || typeof snapshot !== "object") {
-      if (await stalled(step, observation.retry || "page response unavailable; re-observing")) return setStatus(STALLED_STATUS)
+      if (await stalled(step, observation.retry || "page response unavailable; re-observing")) return setStatus(`${STALLED_STATUS} (last: ${observation.retry || "no page response"})`)
       continue
     }
     if (snapshot.error) return setStatus(snapshot.error)

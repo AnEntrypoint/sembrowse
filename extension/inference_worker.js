@@ -293,9 +293,18 @@ async function realizeSelect(context, option, budget, image) {
   return { decision: { operation: "SELECT", id: option.id, optionIndex: Number(choice.option.id) } }
 }
 
-async function realizeNavigateUrl(goal, budget, image) {
+const compact = (text) => String(text ?? "").toLowerCase().replace(/[^a-z0-9]/g, "")
+
+const siteLabel = (hostname) => {
+  const labels = hostname.replace(/^www./, "").split(".")
+  return labels.length > 2 && labels[labels.length - 2].length <= 3 ? labels[labels.length - 3] : labels[labels.length - 2]
+}
+
+const namesKnownSite = (url, known) => compact(known).includes(compact(siteLabel(new URL(url).hostname)))
+
+async function realizeNavigateUrl(goal, known, budget, image) {
   const generated = await generateText(
-    "Reply with only the https:// homepage URL of the website named in the goal. No explanation, no quotes, no extra text.",
+    "Reply with only the https:// homepage URL of the website named in the goal. If the goal names no website, reply NONE. No explanation, no quotes, no extra text.",
     `Goal:\n${clip(goal, 256)}`,
     32,
     budget,
@@ -303,13 +312,15 @@ async function realizeNavigateUrl(goal, budget, image) {
   )
   if (generated.error) return generated
   const url = isPlausibleUrl(generated.text)
-  return url ? { decision: { operation: "NAVIGATE_URL", url } } : { error: "The local model did not return a valid URL" }
+  if (!url) return { error: "The local model did not return a valid URL" }
+  if (!namesKnownSite(url, known)) return { error: "The generated address names a site that appears nowhere in the goal or on the page" }
+  return { decision: { operation: "NAVIGATE_URL", url } }
 }
 
-const realize = (option, context, goal, budget, image) => {
+const realize = (option, context, goal, known, budget, image) => {
   if (option.mode === "TYPE_TEXT") return realizeTypeText(context, option, goal, budget, image)
   if (option.mode === "SELECT") return realizeSelect(context, option, budget, image)
-  if (option.mode === "NAVIGATE_URL") return realizeNavigateUrl(goal, budget, image)
+  if (option.mode === "NAVIGATE_URL") return realizeNavigateUrl(goal, known, budget, image)
   if (option.mode === "CLICK") return Promise.resolve({ decision: { operation: "CLICK", id: option.id } })
   return Promise.resolve({ decision: { operation: option.mode } })
 }
@@ -339,7 +350,9 @@ async function decide(reqId, state, goal, candidates, remainingCalls) {
 async function decideWithin(budget, reqId, state, goal, candidates) {
   const image = visionCapable && state.screenshot ? screenshotBytes(state.screenshot) : undefined
   const context = describeState(goal, state)
-  let options = [...offeredCandidates(candidates), ...operationOptions(state.scroll)]
+  const offered = offeredCandidates(candidates)
+  const known = [goal, state.url, ...offered.map((candidate) => candidate.description)].join(" ")
+  let options = [...offered, ...operationOptions(state.scroll)]
   let lastError = ""
   while (options.length >= 2) {
     const chosen = await chooseOne(context, options, "Choose the next action that most directly advances the goal:", budget, image)
@@ -352,7 +365,7 @@ async function decideWithin(budget, reqId, state, goal, candidates) {
         continue
       }
     }
-    const outcome = await realize(chosen.option, context, goal, budget, image)
+    const outcome = await realize(chosen.option, context, goal, known, budget, image)
     if (!outcome.error) return send(reqId, { type: "decision", ...outcome.decision, calls: budget.calls })
     lastError = outcome.error
     options = options.filter((option) => option !== chosen.option)
